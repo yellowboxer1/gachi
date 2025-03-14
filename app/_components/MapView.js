@@ -1,130 +1,58 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { NaverMapView, NaverMapPathOverlay } from '@mj-studio/react-native-naver-map';
-import { StyleSheet, View, Text, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text } from 'react-native';
 import * as Speech from 'expo-speech';
-import { getTransitDirections, getPedestrianDirections } from '../../services/naverMapService';
 import { isValidLatLng } from '../../utils/locationUtils';
 
-const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalVisible, startListening, stopListening }) => {
-    const [tapCount, setTapCount] = useState(0);
+const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalVisible, startListening, stopListening, startNavigation }) => {
+    const [isGestureMode, setIsGestureMode] = useState(false);
+    const tapCount = useRef(0);
+    const lastTapTime = useRef(0);
     const tapTimer = useRef(null);
-    const pressTimer = useRef(null);
-    const mapRef = useRef(null);
 
-    const handleLongPress = async () => {
-        console.log('Long press detected');
-        setIsSpeechModalVisible(true);
-        Speech.speak('목적지 검색 모드로 전환합니다. 목적지 이름을 말씀해주세요.', { language: 'ko-KR' });
-        await startListening();
+    const handleMapClick = (e) => {
+        const currentTime = Date.now();
+        const timeSinceLastTap = currentTime - lastTapTime.current;
+
+        tapCount.current += 1;
+
+        if (tapCount.current === 1) {
+            tapTimer.current = setTimeout(() => {
+                console.log('Single tap detected');
+                if (!isGestureMode && destination) {
+                    startNavigation(destination);
+                }
+                tapCount.current = 0;
+            }, 300); // 300ms 후 단일 탭 확정
+        } else if (tapCount.current === 2 && timeSinceLastTap < 300) {
+            clearTimeout(tapTimer.current);
+            console.log('Double tap detected');
+            if (!isGestureMode) {
+                setIsGestureMode(true);
+                setIsSpeechModalVisible(true);
+                Speech.speak('목적지 검색 모드로 전환합니다. 목적지 이름을 말씀해주세요.', { language: 'ko-KR' });
+                startListening();
+            } else {
+                setIsGestureMode(false);
+                setIsSpeechModalVisible(false);
+                stopListening();
+                Speech.speak('일반 모드로 전환합니다.', { language: 'ko-KR' });
+            }
+            tapCount.current = 0;
+        }
+
+        lastTapTime.current = currentTime;
     };
 
     useEffect(() => {
-        if (tapCount === 1) {
-            tapTimer.current = setTimeout(() => {
-                console.log('Single tap detected, resetting tap count');
-                setTapCount(0);
-            }, 300); // 더블 탭 감지 시간을 300ms로 조정
-        } else if (tapCount === 2) {
+        return () => {
             clearTimeout(tapTimer.current);
-            console.log('Double tap detected');
-            setTapCount(0);
-            setIsSpeechModalVisible(false);
-            stopListening();
-        }
-        return () => clearTimeout(tapTimer.current);
-    }, [tapCount]);
+        };
+    }, []);
 
-    const handleTap = () => {
-        setTapCount(prev => prev + 1);
-    };
-
-    const handleTouchStart = () => {
-        pressTimer.current = setTimeout(() => {
-            handleLongPress();
-        }, 500);
-    };
-
-    const handleTouchEnd = () => {
-        if (pressTimer.current) {
-            clearTimeout(pressTimer.current);
-        }
-    };
-
-    const startNavigation = async () => {
-        try {
-            console.log('User Location:', userLocation);
-            console.log('Destination:', destination);
-
-            if (!userLocation || !destination) {
-                Speech.speak('위치 또는 목적지가 설정되지 않았습니다.', { language: 'ko-KR' });
-                console.error('위치 또는 목적지가 설정되지 않았습니다.');
-                return;
-            }
-
-            if (!isValidLatLng(userLocation) || !isValidLatLng(destination)) {
-                Speech.speak('유효하지 않은 위치 또는 목적지입니다.', { language: 'ko-KR' });
-                console.error('유효하지 않은 위치 또는 목적지입니다.');
-                return;
-            }
-
-            Speech.speak('내비게이션을 시작합니다.', { language: 'ko-KR' });
-
-            let formattedRouteStructured = { walk: [], subway: [], bus: [] };
-            try {
-                const { formattedRoute, navigationInstructions } = await getTransitDirections(userLocation, destination);
-
-                let currentMode = 'walk';
-                let currentSegment = [];
-                formattedRoute.forEach((coord, index) => {
-                    const instruction = navigationInstructions.find(inst => 
-                        inst.position.latitude === coord.latitude && inst.position.longitude === coord.longitude
-                    );
-
-                    if (instruction) {
-                        if (currentSegment.length > 0) {
-                            formattedRouteStructured[currentMode].push(...currentSegment);
-                            currentSegment = [];
-                        }
-                        currentMode = instruction.type;
-                    }
-                    currentSegment.push(coord);
-
-                    if (index === formattedRoute.length - 1 && currentSegment.length > 0) {
-                        formattedRouteStructured[currentMode].push(...currentSegment);
-                    }
-                });
-                console.log('대중교통 경로 성공 - Formatted route:', formattedRouteStructured);
-            } catch (transitError) {
-                console.warn('대중교통 경로 가져오기 실패, 보행자 경로로 전환:', transitError.message);
-                const { formattedRoute, navigationInstructions } = await getPedestrianDirections(userLocation, destination);
-
-                formattedRouteStructured.walk = formattedRoute;
-                navigationInstructions.forEach(instruction => {
-                    if (instruction.type === 'crosswalk') {
-                        formattedRouteStructured.walk.push(instruction.position);
-                    }
-                });
-                console.log('보행자 경로 성공 - Formatted route:', formattedRouteStructured);
-            }
-
-            setRoute(formattedRouteStructured);
-
-            if (mapRef.current) {
-                mapRef.current.animateToCoordinate({
-                    latitude: userLocation.latitude,
-                    longitude: userLocation.longitude,
-                });
-            }
-        } catch (error) {
-            console.error('내비게이션 시작 오류:', error);
-            Speech.speak('내비게이션을 시작하는 데 문제가 발생했습니다.', { language: 'ko-KR' });
-        }
-    };
-
-    return userLocation ? (
+    return userLocation && isValidLatLng(userLocation) ? (
         <View style={styles.mapContainer}>
             <NaverMapView
-                ref={mapRef}
                 style={styles.map}
                 camera={{
                     latitude: userLocation.latitude,
@@ -139,13 +67,14 @@ const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalV
                 showsLocationButton={true}
                 scaleBar={false}
                 locationTrackingMode="Follow"
-                onTapMap={(event) => {
-                    console.log('Map tapped:', event);
-                    startNavigation(); // 지도 탭 시 내비게이션 시작
-                }}
+                onMapClick={handleMapClick} // 더블 탭으로 음성 인식
+                scrollGesturesEnabled={true}
+                zoomGesturesEnabled={true}
+                tiltGesturesEnabled={true}
+                rotateGesturesEnabled={true}
             >
                 {route?.walk?.length >= 2 && (
-                    <NaverMapPathOverlay
+                    <NaverMapViewPathOverlay
                         coords={route.walk}
                         width={5}
                         color="#808080"
@@ -154,7 +83,7 @@ const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalV
                     />
                 )}
                 {route?.subway?.length >= 2 && (
-                    <NaverMapPathOverlay
+                    <NaverMapViewPathOverlay
                         coords={route.subway}
                         width={5}
                         color="#F06A00"
@@ -163,7 +92,7 @@ const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalV
                     />
                 )}
                 {route?.bus?.length >= 2 && (
-                    <NaverMapPathOverlay
+                    <NaverMapViewPathOverlay
                         coords={route.bus}
                         width={5}
                         color="#FF0000"
@@ -172,15 +101,13 @@ const MapView = ({ userLocation, destination, route, setRoute, setIsSpeechModalV
                     />
                 )}
             </NaverMapView>
-            <TouchableOpacity
-                style={styles.overlay}
-                onPressIn={handleTouchStart}
-                onPressOut={handleTouchEnd}
-                onPress={handleTap}
-                activeOpacity={1}
-                // 지도 이동을 허용하기 위해 pointerEvents 조정
-                pointerEvents="box-none"
-            />
+
+            {/* 모드 표시 */}
+            <View style={styles.modeIndicator}>
+                <Text style={styles.modeText}>
+                    {isGestureMode ? '음성 검색 모드' : '일반 모드'}
+                </Text>
+            </View>
         </View>
     ) : (
         <View style={styles.loadingContainer}>
@@ -198,14 +125,24 @@ const styles = StyleSheet.create({
         flex: 1,
         width: '100%',
     },
-    overlay: {
-        ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'transparent',
-    },
     loadingContainer: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
+    },
+    modeIndicator: {
+        position: 'absolute',
+        top: 20,
+        alignSelf: 'center',
+        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+        paddingVertical: 8,
+        paddingHorizontal: 15,
+        borderRadius: 20,
+    },
+    modeText: {
+        color: 'white',
+        fontWeight: 'bold',
+        fontSize: 14,
     },
 });
 
