@@ -13,17 +13,22 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
     const [end, setEnd] = useState('');
     const [error, setError] = useState('');
     const [isListening, setIsListening] = useState(false);
+    const [isFinal, setIsFinal] = useState(false);
+    const [transcript, setTranscript] = useState('');
 
     useSpeechRecognitionEvent('start', () => {
         console.log('onSpeechStart');
         setStarted('√');
+        setIsFinal(false);
     });
+    
     useSpeechRecognitionEvent('end', () => {
         console.log('onSpeechEnd');
         setEnd('√');
         setIsListening(false);
         setIsSpeechModalVisible(false);
     });
+    
     useSpeechRecognitionEvent('error', (e) => {
         console.log('onSpeechError: ', e);
         setError(JSON.stringify(e?.error || 'Unknown error'));
@@ -33,10 +38,12 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
             Speech.speak('음성이 감지되지 않았습니다. 다시 시도해주세요.', { language: 'ko-KR' });
         }
     });
+    
     useSpeechRecognitionEvent('result', (e) => {
         console.log('onSpeechResults: ', e);
         const resultsArray = (e?.results || []).map(result => result?.transcript || '');
         setResults(resultsArray);
+        
         if (e?.isFinal && resultsArray.length > 0) {
             const filteredResults = resultsArray
                 .map(text => text
@@ -45,9 +52,13 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
                     .trim()
                 )
                 .filter(text => text.length > 0);
+                
             const destinationName = filteredResults[filteredResults.length - 1] || '';
+            
             if (destinationName) {
                 setRecognizedText(destinationName);
+                setTranscript(destinationName);
+                setIsFinal(true);
                 console.log('최종 음성 인식 결과:', destinationName);
                 searchDestination(destinationName);
             } else {
@@ -57,13 +68,18 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
             }
         }
     });
+    
     useSpeechRecognitionEvent('partialResult', (e) => {
         console.log('onSpeechPartialResults: ', e);
         const partialArray = (e?.results || []).map(result => result?.transcript || '');
         setPartialResults(partialArray);
+        
+        if (partialArray.length > 0) {
+            setTranscript(partialArray[0]);
+        }
     });
 
-    const searchDestination = async (destinationName) => {
+const searchDestination = async (destinationName) => {
         try {
             if (!userLocation) {
                 throw new Error('현재 위치가 설정되지 않았습니다.');
@@ -71,23 +87,18 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
             const coords = await getPoiCoordinates(destinationName, userLocation);
             if (isValidLatLng(coords)) {
                 setDestination(coords);
-                console.log('목적지 설정 완료:', coords);
-                Speech.speak(`${destinationName} 검색 중입니다. 잠시만 기다려주세요.`, { language: 'ko-KR' });
-                await new Promise(resolve => setTimeout(() => {
-                    console.log('상태 반영 대기 후 목적지:', coords);
-                    resolve();
-                }, 100));
-                await startNavigation(coords);
+                Speech.speak(`${destinationName} 검색이 완료되었습니다. 내비게이션을 시작합니다.`, { language: 'ko-KR' });
+                await startNavigation(coords); // 내비게이션 시작
                 setIsSpeechModalVisible(false);
-            } else {
-                throw new Error('유효하지 않은 목적지 좌표');
+                return true;
             }
         } catch (err) {
             console.error('목적지 검색 오류:', err);
             Speech.speak(err.message || '목적지 검색에 실패했습니다. 다시 시도해주세요.', { language: 'ko-KR' });
             setIsSpeechModalVisible(false);
+            return false;
         }
-    };
+};
 
     const startListening = async () => {
         if (!ExpoSpeechRecognitionModule) {
@@ -113,6 +124,8 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
 
             setIsListening(true);
             setRecognizedText('');
+            setIsFinal(false);
+            setTranscript('');
             resetStates();
 
             await ExpoSpeechRecognitionModule.start({
@@ -123,6 +136,7 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
             });
             console.log('Speech recognition started');
             Speech.speak('목적지를 말씀해주세요.', { language: 'ko-KR' });
+            
             // 5초 후 강제 종료
             setTimeout(async () => {
                 if (isListening) {
@@ -150,7 +164,6 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
             console.log('Speech recognition stopped');
             setIsListening(false);
             setIsSpeechModalVisible(false);
-            // Speech.speak('인식 종료', { language: 'ko-KR' }); // 필요 시 주석 해제
         } catch (error) {
             console.error('음성 인식 중지 에러:', error);
             setIsListening(false);
@@ -172,11 +185,14 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
 
     return {
         recognizedText,
+        transcript,
+        isFinal,
         results,
         partialResults,
         started,
         end,
         error,
+        isListening,
         startListening,
         stopListening,
     };

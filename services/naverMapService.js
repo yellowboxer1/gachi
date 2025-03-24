@@ -141,3 +141,76 @@ export const getCoordinates = async (query, userLocation = null) => {
         throw error;
     }
 };
+
+// 새로 추가된 함수
+export const getNaverDirections = async (start, goal) => {
+    try {
+        console.log('NAVER_MAP_CLIENT_ID:', NAVER_MAP_CLIENT_ID);
+        console.log('NAVER_MAP_CLIENT_SECRET:', NAVER_MAP_CLIENT_SECRET);
+        if (!NAVER_MAP_CLIENT_ID || !NAVER_MAP_CLIENT_SECRET) {
+            throw new Error('네이버 API 키가 .env에서 로드되지 않았습니다.');
+        }
+
+        const startCoords = `${start.longitude},${start.latitude}`;
+        const goalCoords = `${goal.longitude},${goal.latitude}`;
+
+        console.log('Naver Directions API 호출 - 시작:', startCoords, '목적지:', goalCoords);
+
+        const url = 'https://naveropenapi.apigw.ntruss.com/map-direction/v1/driving';
+        const queryParams = new URLSearchParams({
+            start: startCoords,
+            goal: goalCoords,
+            option: 'traoptimal',  // 실시간 최적 경로
+        });
+
+        const response = await axios.get(`${url}?${queryParams.toString()}`, {
+            headers: {
+                'X-NCP-APIGW-API-KEY-ID': NAVER_MAP_CLIENT_ID,
+                'X-NCP-APIGW-API-KEY': NAVER_MAP_CLIENT_SECRET,
+            },
+        });
+
+        console.log('Naver Directions API 응답:', JSON.stringify(response.data, null, 2));
+
+        // 경로 데이터 처리
+        const routeData = response.data.route?.traoptimal?.[0];
+        if (!routeData || !routeData.path) {
+            throw new Error('유효한 경로 데이터가 없습니다.');
+        }
+
+        // 경로 좌표 포맷팅
+        const formattedPath = routeData.path.map(([longitude, latitude]) => {
+            if (isNaN(longitude) || isNaN(latitude)) {
+                console.warn('잘못된 좌표 형식:', [longitude, latitude]);
+                return null;
+            }
+            return { latitude, longitude };
+        }).filter(coord => coord !== null);
+
+        if (formattedPath.length < 2) {
+            console.warn('포맷된 경로 좌표가 2개 미만입니다:', formattedPath);
+            throw new Error('경로 좌표가 부족합니다.');
+        }
+
+        // 안내 정보 처리
+        const guideInfo = routeData.guide.map(guide => ({
+            pointIndex: guide.pointIndex,
+            type: guide.type,
+            description: guide.instructions,
+            position: formattedPath[guide.pointIndex],
+            distance: guide.distance,
+            duration: guide.duration
+        }));
+
+        console.log('포맷된 경로:', formattedPath);
+        console.log('안내 정보:', guideInfo);
+
+        return { 
+            formattedRoute: formattedPath, 
+            navigationInstructions: guideInfo 
+        };
+    } catch (error) {
+        console.error('네이버 Directions API 호출 오류:', error.response ? error.response.data : error.message);
+        throw error;
+    }
+};

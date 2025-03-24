@@ -19,7 +19,7 @@ export default ({ config }) => ({
     package: 'com.gachigagae',
     versionCode: 1,
     adaptiveIcon: {
-      foregroundImage: './assets/images/adaptive-icon.png',
+      foregroundImage: './assets/images/icon.png',
       backgroundColor: '#ffffff',
     },
   },
