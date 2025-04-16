@@ -88,20 +88,26 @@ export default function MainScreen() {
     // 목적지 검색 함수 (확인 모드 종료, 경로 안내 모드 진입)
     const searchDestination = async (query) => {
         try {
-            const coordinates = await getPoiCoordinates(query, userLocation);
-            if (!coordinates) throw new Error('목적지 없음');
-            
-            setDestination(coordinates);
-            console.log('목적지 설정 완료:', coordinates);
-            
-            await startNavigation(coordinates);
-            stopSpeechMode(); // 음성 검색 모드 종료
-            setIsNavigationMode(true); // 경로 안내 모드 진입
+          const poiDataList = await getPoiCoordinates(query, userLocation);
+          if (!poiDataList || poiDataList.length === 0) throw new Error('목적지 없음');
+          
+          // 첫 번째 POI에서 좌표 정보만 추출
+          const coordinates = {
+            latitude: poiDataList[0].latitude,
+            longitude: poiDataList[0].longitude
+          };
+          
+          setDestination(coordinates);
+          console.log('목적지 설정 완료:', coordinates);
+          
+          await startNavigation(coordinates);
+          stopSpeechMode(); // 음성 검색 모드 종료
+          setIsNavigationMode(true); // 경로 안내 모드 진입
         } catch (error) {
-            console.error('검색 오류:', error);
-            Alert.alert('검색 오류', '목적지를 찾을 수 없습니다.');
+          console.error('검색 오류:', error);
+          Alert.alert('검색 오류', '목적지를 찾을 수 없습니다.');
         }
-    };
+      };
     // 내비게이션 종료 함수 (MapView로 이동)
     const stopNavigation = useCallback(() => {
         Speech.speak('경로 안내를 종료합니다.', { language: 'ko-KR' });
