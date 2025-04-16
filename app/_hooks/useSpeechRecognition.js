@@ -60,7 +60,8 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
                 setTranscript(destinationName);
                 setIsFinal(true);
                 console.log('최종 음성 인식 결과:', destinationName);
-                searchDestination(destinationName);
+                // 확인 모드를 위해 여기서 직접 검색하지 않음
+                // MapView에서 확인 후 처리하도록 함
             } else {
                 console.log('유효한 목적지가 없습니다.');
                 Speech.speak('목적지를 인식하지 못했습니다. 다시 말씀해주세요.', { language: 'ko-KR' });
@@ -79,7 +80,8 @@ const useSpeechRecognition = ({ setRoute, setDestination, setIsSpeechModalVisibl
         }
     });
 
-const searchDestination = async (destinationName) => {
+    // 이 함수는 MapView에서 직접 호출하지 않고, startNavigation을 호출하도록 변경
+    const searchDestination = async (destinationName) => {
         try {
             if (!userLocation) {
                 throw new Error('현재 위치가 설정되지 않았습니다.');
@@ -98,7 +100,7 @@ const searchDestination = async (destinationName) => {
             setIsSpeechModalVisible(false);
             return false;
         }
-};
+    };
 
     const startListening = async () => {
         if (!ExpoSpeechRecognitionModule) {

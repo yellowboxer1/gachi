@@ -28,7 +28,7 @@ const styles = StyleSheet.create({
         marginTop: 150, // 추가: 모달을 아래로 100px 이동
     },
     modalContent: {
-        backgroundColor: 'rgba(0, 0, 0, 0.3)',
+        backgroundColor: 'rgba(0, 0, 0, 0.0)',
         padding: 20,
         borderRadius: 10,
     },

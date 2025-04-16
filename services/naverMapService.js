@@ -1,19 +1,7 @@
 import axios from 'axios';
 import { NAVER_MAP_CLIENT_ID, NAVER_MAP_CLIENT_SECRET } from '@env';
 
-// 지역명을 추론하는 함수
-const inferRegionFromLocation = (latitude, longitude) => {
-    if (latitude >= 35 && latitude <= 36 && longitude >= 128 && longitude <= 130) {
-        return '부산';
-    } else if (latitude >= 37 && latitude <= 38 && longitude >= 126 && longitude <= 128) {
-        return '서울';
-    } else if (latitude >= 36 && latitude <= 37 && longitude >= 127 && longitude <= 128) {
-        return '대전';
-    }
-    return '';
-};
-
-export const getDirections = async (start, goal) => {
+ export const getDirections = async (start, goal) => {
     try {
         console.log('NAVER_MAP_CLIENT_ID:', NAVER_MAP_CLIENT_ID);
         console.log('NAVER_MAP_CLIENT_SECRET:', NAVER_MAP_CLIENT_SECRET);

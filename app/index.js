@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { View, TouchableOpacity, Image, Dimensions, Text, StatusBar, Platform } from 'react-native';
+import { View, TouchableOpacity, Image, Dimensions, Text, StatusBar, Platform, StyleSheet } from 'react-native';
 import * as Speech from 'expo-speech';
 import { useFonts } from 'expo-font';
 import { useRouter } from 'expo-router';
 
+// 원본 코드와 동일한 비율 계산 방식
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ASPECT_RATIO = 375 / 812;
 const IMAGE_WIDTH = SCREEN_WIDTH;
@@ -20,9 +21,9 @@ export default function Splash() {
         if (fontsLoaded && !fontError) {
             const timer = setTimeout(() => {
                 setAppState('notice');
-                Speech.speak('주의, 이 앱은 보이스 오버 또는 토크백의 사용이 필수입니다. 시작하려면 화면을 눌러주세요.', {
+                Speech.speak('주의, 이 앱은 보이스 오버 또는 토크백의 사용을 권장합니다. 시작하려면 화면을 눌러주세요.', {
                     language: 'ko-KR',
-                    onError: (error) => console.error('Speech error:', error), // 오류 핸들링 추가
+                    onError: (error) => console.error('Speech error:', error),
                 });
             }, 3000);
             return () => clearTimeout(timer);
@@ -43,7 +44,6 @@ export default function Splash() {
                     barStyle="light-content"
                     translucent={Platform.OS === 'ios'}
                 />
-                <Text>Loading fonts...</Text>
             </View>
         );
     }
@@ -65,12 +65,14 @@ export default function Splash() {
                     style={styles.noticeContainer}
                     onPress={handlePress}
                     accessible={true}
-                    accessibilityLabel="주의, 이 앱은 보이스 오버 또는 토크백의 사용이 필수입니다. 시작하려면 화면을 눌러주세요."
+                    accessibilityLabel="주의, 이 앱은 보이스 오버 또는 토크백의 사용을 권장합니다. 시작하려면 화면을 눌러주세요."
                 >
-                    <Image
-                        source={require('../assets/images/warning.png')}
-                        style={{ width: IMAGE_WIDTH, height: IMAGE_HEIGHT, resizeMode: 'contain' }}
-                    />
+                    <View style={styles.imageWrapper}>
+                        <Image
+                            source={require('../assets/images/warning.png')}
+                            style={{ width: IMAGE_WIDTH, height: IMAGE_HEIGHT, resizeMode: 'contain' }}
+                        />
+                    </View>
                 </TouchableOpacity>
             )}
         </View>
@@ -89,5 +91,13 @@ const styles = {
         justifyContent: 'center',
         alignItems: 'center',
         backgroundColor: '#F5FCFF',
+        width: '100%',
+        height: '100%',
     },
+    imageWrapper: {
+        width: '100%',
+        height: '100%',
+        justifyContent: 'center',
+        alignItems: 'center',
+    }
 };

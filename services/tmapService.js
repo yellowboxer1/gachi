@@ -39,12 +39,14 @@ export const getPoiCoordinates = async (query, userLocation = null) => {
             version: 1,
             searchKeyword: query,
             appKey: TMAP_APP_KEY,
-            count: 1,
+            count: 3, // 최대 3개 요청
         };
 
-        if (userLocation) {
+        if (userLocation && validateCoordinates([userLocation]).length > 0) {
             params.centerLat = userLocation.latitude;
             params.centerLon = userLocation.longitude;
+        } else {
+            console.warn('유효하지 않은 사용자 위치, 기본 검색 수행:', JSON.stringify(userLocation));
         }
 
         console.log('Tmap POI API 호출 - 쿼리:', query, '위치:', userLocation);
@@ -59,32 +61,62 @@ export const getPoiCoordinates = async (query, userLocation = null) => {
 
         console.log('Tmap POI API 응답:', JSON.stringify(response.data, null, 2));
 
-        const poi = response.data.searchPoiInfo?.pois?.poi?.[0];
-        if (!poi) {
-            throw new Error(`"${query}"에 대한 좌표를 찾을 수 없습니다.`);
+        const pois = response.data.searchPoiInfo?.pois?.poi;
+        if (!pois || !Array.isArray(pois) || pois.length === 0) {
+            console.warn(`"${query}"에 대한 POI를 찾을 수 없습니다.`);
+            return [];
         }
 
-        // 수정: latitude를 먼저 오게 변경, 명시적 변환 추가
-        const latitude = parseFloat(poi.frontLat);
-        const longitude = parseFloat(poi.frontLon);
-        
-        if (isNaN(latitude) || isNaN(longitude)) {
-            throw new Error('좌표 형식이 잘못되었습니다.');
+        const poiList = pois.map(poi => {
+            const latitude = parseFloat(poi.frontLat);
+            const longitude = parseFloat(poi.frontLon);
+
+            if (isNaN(latitude) || isNaN(longitude)) {
+                console.warn(`잘못된 좌표 형식:`, poi);
+                return null;
+            }
+
+            if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+                console.warn(`좌표가 유효 범위를 벗어남:`, { latitude, longitude });
+                return null;
+            }
+
+            return {
+                latitude,
+                longitude,
+                upperAddrName: poi.upperAddrName || '',
+                name: poi.name || query,
+            };
+        }).filter(poi => poi !== null);
+
+        // 사용자 위치 기반 거리순 정렬
+        if (poiList.length > 1 && userLocation && validateCoordinates([userLocation]).length > 0) {
+            poiList.sort((a, b) => {
+                const distA = calculateDistance(
+                    userLocation.latitude,
+                    userLocation.longitude,
+                    a.latitude,
+                    a.longitude
+                );
+                const distB = calculateDistance(
+                    userLocation.latitude,
+                    userLocation.longitude,
+                    b.latitude,
+                    b.longitude
+                );
+                return distA - distB;
+            });
         }
 
-        // 유효 범위 검사 추가
-        if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-            throw new Error('좌표가 유효 범위를 벗어났습니다.');
-        }
-
-        console.log(`POI 검색 성공 - ${query}:`, { latitude, longitude });
-        return { latitude, longitude };
+        console.log(`POI 검색 성공 - ${query}:`, JSON.stringify(poiList));
+        return poiList;
     } catch (error) {
         console.error('Tmap POI API 호출 오류:', error.response ? error.response.data : error.message);
-        throw error;
+        return [];
     }
 };
 
+// 나머지 함수는 변경 없음
 export const getTransitDirections = async (start, goal) => {
     try {
         if (!TMAP_APP_KEY) {

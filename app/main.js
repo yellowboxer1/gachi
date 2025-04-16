@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { View, StyleSheet, Alert, Text, TouchableOpacity } from 'react-native';
+import { View, StyleSheet, Alert, Text } from 'react-native';
 import { router } from 'expo-router';
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
@@ -7,23 +7,23 @@ import MapView from './_components/MapView';
 import useSpeechRecognition from './_hooks/useSpeechRecognition';
 import { getPoiCoordinates, getCombinedDirections } from '../services/tmapService';
 import { calculateDistance, DEFAULT_LOCATION } from '../utils/locationUtils';
-
 const LOCATION_INTERVAL = 1000; // 위치 업데이트 간격 (밀리초)
-
 export default function MainScreen() {
     // 상태 관리
     const [userLocation, setUserLocation] = useState(null);
     const [destination, setDestination] = useState(null);
     const [route, setRoute] = useState(null);
+    const [initialMessageShown, setInitialMessageShown] = useState(false);
     const [instructions, setInstructions] = useState([]);
     const [nextInstruction, setNextInstruction] = useState(null);
     const [currentInstructionIndex, setCurrentInstructionIndex] = useState(0);
     const [isNavigating, setIsNavigating] = useState(false);
     const [isSpeechModalVisible, setIsSpeechModalVisible] = useState(false);
     const [isMounted, setIsMounted] = useState(false); // 마운트 상태 관리
-
+    const [speechResultCallback, setSpeechResultCallback] = useState(null); // 음성 인식 결과 콜백 함수
+    const [isConfirmMode, setIsConfirmMode] = useState(false); // 추가: 확인 모드 상태
+    const [isNavigationMode, setIsNavigationMode] = useState(false); // 추가: 경로 안내 모드
     const locationSubscription = useRef(null);
-
     // 내비게이션 시작 함수 (useCallback으로 메모이제이션)
     const startNavigation = useCallback(async (effectiveDestination) => {
         try {
@@ -54,6 +54,7 @@ export default function MainScreen() {
             setCurrentInstructionIndex(() => 0);
             setDestination(() => effectiveDestination);
             setIsNavigating(() => true);
+            setIsNavigationMode(true); // 추가: 경로 안내 모드 활성화
     
             Speech.speak('경로 안내를 시작합니다.', { language: 'ko-KR' });
             return true;
@@ -63,25 +64,62 @@ export default function MainScreen() {
             return false;
         }
     }, [userLocation]);
-
-    // 위치 및 음성 인식 (startNavigation 전달 확인)
+    // 음성 인식 결과 핸들러
+    const handleSpeechResult = useCallback((callback) => {
+        setSpeechResultCallback(() => callback);
+    }, []);
+    // 음성 인식 훅
     const { 
         recognizedText,
-        results,
-        partialResults,
-        started,
-        end,
-        error,
         startListening, 
-        stopListening
+        stopListening 
     } = useSpeechRecognition({
         setRoute,
         setDestination,
         setIsSpeechModalVisible,
         userLocation,
-        startNavigation // startNavigation 명시적으로 전달
+        startNavigation
     });
-
+    // 음성 검색 모드 종료 함수
+    const stopSpeechMode = () => {
+        setIsConfirmMode(false);
+        stopListening();
+    };
+    // 목적지 검색 함수 (확인 모드 종료, 경로 안내 모드 진입)
+    const searchDestination = async (query) => {
+        try {
+            const coordinates = await getPoiCoordinates(query, userLocation);
+            if (!coordinates) throw new Error('목적지 없음');
+            
+            setDestination(coordinates);
+            console.log('목적지 설정 완료:', coordinates);
+            
+            await startNavigation(coordinates);
+            stopSpeechMode(); // 음성 검색 모드 종료
+            setIsNavigationMode(true); // 경로 안내 모드 진입
+        } catch (error) {
+            console.error('검색 오류:', error);
+            Alert.alert('검색 오류', '목적지를 찾을 수 없습니다.');
+        }
+    };
+    // 내비게이션 종료 함수 (MapView로 이동)
+    const stopNavigation = useCallback(() => {
+        Speech.speak('경로 안내를 종료합니다.', { language: 'ko-KR' });
+        setIsNavigating(false);
+        setIsNavigationMode(false);
+        setRoute(null);
+        setInstructions([]);
+        setDestination(null);
+        setCurrentInstructionIndex(0);
+        setNextInstruction(null);
+      }, []);
+    // 음성 인식 결과가 나오면 MapView로 전달
+    useEffect(() => {
+        if (recognizedText && speechResultCallback) {
+            console.log('음성 인식 결과 콜백 호출:', recognizedText);
+            speechResultCallback(recognizedText);
+        }
+    }, [recognizedText, speechResultCallback]);
     // 마운트 상태 설정
     useEffect(() => {
         let isActive = true;
@@ -141,32 +179,7 @@ export default function MainScreen() {
                 locationSubscription.current.remove();
             }
         };
-    }, [isNavigating, checkNextInstruction]);
-    // 목적지 검색 함수
-    const searchDestination = async (query) => {
-        try {
-            const coordinates = await getPoiCoordinates(query, userLocation);
-            if (coordinates) {
-                setDestination(coordinates);
-                console.log('목적지 설정 완료:', coordinates);
-                await startNavigation(coordinates); // 검색 후 바로 내비게이션 시작
-            }
-        } catch (error) {
-            console.error('목적지 검색 오류:', error);
-            Alert.alert('목적지 검색 오류', '목적지를 찾을 수 없습니다.');
-        }
-    };
-    
-    // 내비게이션 종료 함수
-    const stopNavigation = useCallback(() => {
-        setRoute(null);
-        setInstructions([]);
-        setNextInstruction(null);
-        setCurrentInstructionIndex(0);
-        setIsNavigating(false);
-        Speech.speak('경로 안내를 종료합니다.', { language: 'ko-KR' });
-    }, []);
-
+    }, [isNavigating]);
     // 다음 안내 확인 함수 (useCallback으로 메모이제이션)
     const checkNextInstruction = useCallback((currentPosition) => {
         if (!instructions || instructions.length === 0 || currentInstructionIndex >= instructions.length) {
@@ -187,7 +200,7 @@ export default function MainScreen() {
                 
                 if (distance <= 10) {
                     Alert.alert('도착', '목적지에 도착했습니다.');
-                    stopNavigation();
+                    // stopNavigation(); // MapView에서 처리
                 }
             }
             return;
@@ -208,70 +221,51 @@ export default function MainScreen() {
                 Speech.speak(nextInstruction.description, { language: 'ko-KR' });
             }
         }
-    }, [instructions, currentInstructionIndex, stopNavigation]);
-
-
-    return (
+    }, [instructions, currentInstructionIndex]); // stopNavigation 제거
+    // 시작 메시지 재생
+    useEffect(() => {
+        if (isMounted && userLocation && !initialMessageShown && !isNavigating) {
+          const initialMessageTimer = setTimeout(() => {
+            Speech.speak('화면을 길게 누르면 음성인식 모드가 실행됩니다.', { language: 'ko-KR' });
+            setInitialMessageShown(true);
+          }, 2000);
+          
+          return () => clearTimeout(initialMessageTimer);
+        }
+      }, [isMounted, userLocation, initialMessageShown, isNavigating]);
+      return (
         <View style={styles.container}>
-            {(!userLocation || !isMounted) && (
-                <View style={styles.loadingContainer}>
-                    <Text>로딩 중...</Text>
-                </View>
-            )}
-            {userLocation && isMounted && (
-                <MapView
-                    userLocation={userLocation}
-                    destination={destination}
-                    route={route}
-                    instructions={instructions}
-                    nextInstruction={nextInstruction}
-                    setRoute={setRoute}
-                    startListening={startListening}
-                    stopListening={stopListening}
-                    startNavigation={startNavigation}
-                />
-            )}
-            {isNavigating && (
-                <TouchableOpacity 
-                    style={styles.stopButton}
-                    onPress={() => {
-                        Alert.alert(
-                            '내비게이션 종료',
-                            '내비게이션을 종료하시겠습니까?',
-                            [
-                                { text: '아니오', style: 'cancel' },
-                                { text: '예', onPress: stopNavigation }
-                            ]
-                        );
-                    }}
-                >
-                    <Text style={styles.stopButtonText}>종료</Text>
-                </TouchableOpacity>
-            )}
+          {userLocation && isMounted && (
+            <MapView
+              userLocation={userLocation}
+              destination={destination}
+              route={route}
+              instructions={instructions}
+              nextInstruction={nextInstruction}
+              startListening={startListening}
+              stopListening={stopListening}
+              startNavigation={startNavigation}
+              stopNavigation={stopNavigation} // 추가: 내비게이션 종료 함수 전달
+              onSpeechResult={handleSpeechResult}
+              searchDestination={searchDestination}
+              isConfirmMode={isConfirmMode}
+              setIsConfirmMode={setIsConfirmMode}
+              isNavigationMode={isNavigationMode}
+              setIsNavigating={setIsNavigating}
+              setRoute={setRoute}
+              setInstructions={setInstructions}
+              setDestination={setDestination}
+              setCurrentInstructionIndex={setCurrentInstructionIndex}
+              setNextInstruction={setNextInstruction}
+            />
+          )}
         </View>
-    );
+      );
 }
 
 const styles = StyleSheet.create({
     container: {
         flex: 1,
     },
-    loadingContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-    },
-    stopButton: {
-        position: 'absolute',
-        bottom: 30,
-        right: 20,
-        backgroundColor: 'red',
-        padding: 15,
-        borderRadius: 30,
-        elevation: 5,
-    },
-    stopButtonText: {
-        color: 'white',
-        fontWeight: 'bold',
-    },
+
 });
