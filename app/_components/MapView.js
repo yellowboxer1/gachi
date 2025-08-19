@@ -1,138 +1,132 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { NaverMapView, NaverMapPathOverlay, NaverMapMarkerOverlay } from '@mj-studio/react-native-naver-map';
-import { StyleSheet, View, Text, PanResponder, Dimensions, ActivityIndicator, Button } from 'react-native';
-import { getDirections, getDistanceText, guideTypeToKorean } from '../../services/naverMapService';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import {
+  NaverMapView,
+  NaverMapPathOverlay,
+  NaverMapMarkerOverlay,
+} from '@mj-studio/react-native-naver-map';
+import {
+  StyleSheet,
+  View,
+  Text,
+  PanResponder,
+  Dimensions,
+  ActivityIndicator,
+  TextInput,
+  TouchableOpacity,
+} from 'react-native';
 import * as Speech from 'expo-speech';
-import { DEFAULT_LOCATION } from '../../utils/locationUtils';
-import { getPoiCoordinates } from '../../services/tmapService';
-
-// 좌표 유효성 검사
-const isValidLatLng = (latitude, longitude) => {
-  return (
-    latitude !== undefined &&
-    longitude !== undefined &&
-    !isNaN(parseFloat(latitude)) &&
-    !isNaN(parseFloat(longitude)) &&
-    parseFloat(latitude) >= -90 &&
-    parseFloat(latitude) <= 90 &&
-    parseFloat(longitude) >= -180 &&
-    parseFloat(longitude) <= 180
-  );
-};
-
-// 좌표 포맷팅
-const formatCoordinate = (coord) => {
-  console.log('Raw coordinate input:', JSON.stringify(coord));
-  if (!coord) return null;
-
-  // 배열이면 첫 번째 요소를 선택
-  const targetCoord = Array.isArray(coord) ? coord[0] : coord;
-  if (!targetCoord) {
-    console.error('No valid coordinate in array:', coord);
-    return null;
-  }
-
-  const lat = typeof targetCoord.latitude === 'string' ? parseFloat(targetCoord.latitude) : targetCoord.latitude;
-  const lng = typeof targetCoord.longitude === 'string' ? parseFloat(targetCoord.longitude) : targetCoord.longitude;
-
-  if (isNaN(lat) || isNaN(lng)) {
-    console.error('Invalid coordinate detected:', targetCoord);
-    return null;
-  }
-
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    console.error('Coordinate out of valid range:', { latitude: lat, longitude: lng });
-    return null;
-  }
-
-  return { latitude: lat, longitude: lng };
-};
-
-// 음성 인식 훅
-const useSpeechRecognition = () => {
-  const start = useCallback(() => {
-    console.log('음성 인식 시작');
-    // 실제 음성 인식 로직
-  }, []);
-
-  const stop = useCallback(() => {
-    console.log('음성 인식 중지');
-    // 실제 중지 로직
-  }, []);
-
-  return { start, stop };
-};
-
-// 거리 계산 함수 (Haversine 공식)
-const calculateDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371e3; // 지구 반지름 (미터)
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
-
-  const a =
-    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // 거리 (미터)
-};
+import { getPoiCoordinates } from '../../services/naverService'; // ✅ 검색은 네이버 API
+import { calculateDistance } from '../../utils/locationUtils';
 
 const MapView = ({
   userLocation,
   destination,
   route,
   instructions = [],
-  nextInstruction,
-  setRoute,
   startListening,
   stopListening,
   startNavigation,
   stopNavigation,
-  onSpeechResult,
   searchDestination,
-  isNavigationMode, 
-  setIsNavigationMode,  
+  isNavigationMode,
+  setIsNavigationMode,
+  recognizedText,
 }) => {
+  // ====== State ======
   const [isGestureMode, setIsGestureMode] = useState(false);
   const [isConfirmMode, setIsConfirmMode] = useState(false);
   const [recognizedDestination, setRecognizedDestination] = useState(null);
-  const [recognizedPoiList, setRecognizedPoiList] = useState([]); // 복수 POI 저장
-  const [currentPoiIndex, setCurrentPoiIndex] = useState(0); // 현재 제시된 POI 인덱스
+  const [recognizedPoiList, setRecognizedPoiList] = useState([]);
+  const [currentPoiIndex, setCurrentPoiIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [isRouteLoading, setIsRouteLoading] = useState(false);
-  const [isNavigating, setIsNavigating] = useState(false);
   const [mapError, setMapError] = useState(null);
-  const mapRef = useRef(null);
+
+  // 테스트 입력
+  const [testInputVisible, setTestInputVisible] = useState(false);
+  const [testDestination, setTestDestination] = useState('');
+
+  // 안전 상태
   const [safeWalkRoute, setSafeWalkRoute] = useState([]);
   const [safeSubwayRoute, setSafeSubwayRoute] = useState([]);
   const [safeBusRoute, setSafeBusRoute] = useState([]);
   const [safeDestination, setSafeDestination] = useState(null);
   const [safeUserLocation, setSafeUserLocation] = useState(null);
   const [safeInstructions, setSafeInstructions] = useState([]);
-  const [naverGuides, setNaverGuides] = useState([]);
-  const [currentGuideIndex, setCurrentGuideIndex] = useState(0);
-  const [naverDirectionSummary, setNaverDirectionSummary] = useState(null);
-  const [naverPath, setNaverPath] = useState([]);
 
+  // unified path (대중교통 경로일 때 instructions를 따라 하나로 이어붙인 라인)
+  const [unifiedTransitPath, setUnifiedTransitPath] = useState([]);
+
+  // ====== Refs ======
+  const mapRef = useRef(null);
   const lastTapTimeRef = useRef(0);
   const doubleTapTimeoutRef = useRef(null);
   const longPressTimeoutRef = useRef(null);
   const confirmTimeoutRef = useRef(null);
+  const didFitOnceRef = useRef(false);
+  const followCamTimer = useRef(null);
+  const navInFlightRef = useRef(false);
 
+  // ====== Const ======
   const LONG_PRESS_DURATION = 800;
-  const DOUBLE_TAP_DELAY = 250;
+  const DOUBLE_TAP_DELAY = 380;
   const CONFIRM_TIMEOUT = 10000;
-
   const screenHeight = Dimensions.get('window').height;
   const halfScreenHeight = screenHeight / 2;
+  const DEFAULT_LOCATION = { latitude: 35.1796, longitude: 129.0756 };
 
-  const { start: startSpeech, stop: stopSpeech } = useSpeechRecognition();
+  // ====== Speech util ======
+  const speak = useCallback(async (text) => {
+    try { await Speech.stop(); } catch {}
+    Speech.speak(text, { language: 'ko-KR' });
+  }, []);
 
-  // 내비게이션 초기화
+  // ====== Coord Utils ======
+  const validateAndFormatCoordinate = useCallback((coord) => {
+    if (!coord) return null;
+    const c = Array.isArray(coord) ? coord[0] : coord;
+    if (!c || !('latitude' in c) || !('longitude' in c)) return null;
+    let { latitude: lat, longitude: lng } = c;
+    if (typeof lat === 'string') lat = parseFloat(lat);
+    if (typeof lng === 'string') lng = parseFloat(lng);
+    if (isNaN(lat) || isNaN(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return { latitude: +lat.toFixed(6), longitude: +lng.toFixed(6) };
+  }, []);
+
+  const dedupeSequentialCoords = useCallback((arr) => {
+    const out = [];
+    let prevKey = '';
+    for (const c of arr) {
+      const key = `${c.latitude.toFixed(6)}:${c.longitude.toFixed(6)}`;
+      if (key !== prevKey) out.push(c);
+      prevKey = key;
+    }
+    return out;
+  }, []);
+
+  const validateRouteArray = useCallback(
+    (routeArray) => {
+      if (!Array.isArray(routeArray)) return [];
+      const validated = routeArray
+        .map((coord) => validateAndFormatCoordinate(coord))
+        .filter(Boolean);
+      return dedupeSequentialCoords(validated);
+    },
+    [validateAndFormatCoordinate, dedupeSequentialCoords]
+  );
+
+  // ====== 위치 준비 대기 ======
+  const waitForLocation = useCallback(async (timeoutMs = 2500) => {
+    if (safeUserLocation) return true;
+    const start = Date.now();
+    while (!safeUserLocation && Date.now() - start < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return !!safeUserLocation;
+  }, [safeUserLocation]);
+
+  // ====== Navigation Reset ======
   const resetNavigation = useCallback(() => {
-    console.log('내비게이션 상태 초기화');
-    setIsNavigating(false);
     setIsConfirmMode(false);
     setIsGestureMode(false);
     setRecognizedDestination(null);
@@ -143,363 +137,292 @@ const MapView = ({
     setSafeSubwayRoute([]);
     setSafeBusRoute([]);
     setSafeInstructions([]);
-    if (typeof setRoute === 'function') {
-      setRoute(null);
-    }
-    if (typeof stopNavigation === 'function') {
-      stopNavigation();
-    }
-    stopListening();
-    stopSpeech();
+    setUnifiedTransitPath([]);
+    didFitOnceRef.current = false;
+    navInFlightRef.current = false;
+
+    if (typeof stopListening === 'function') stopListening();
     if (confirmTimeoutRef.current) {
       clearTimeout(confirmTimeoutRef.current);
       confirmTimeoutRef.current = null;
     }
-    if (mapRef.current && safeUserLocation) {
-      mapRef.current.animateToCoordinate(
-        {
-          latitude: safeUserLocation.latitude,
-          longitude: safeUserLocation.longitude,
-          zoom: 16.5,
-        },
-        1000
-      );
-    }
-  }, [setRoute, stopNavigation, stopListening, stopSpeech, safeUserLocation]);
+  }, [stopListening]);
 
-  // POI 제시 함수
-  const presentPoi = useCallback(() => {
-    console.log('presentPoi 호출 - recognizedPoiList:', JSON.stringify(recognizedPoiList), 'currentPoiIndex:', currentPoiIndex);
-    if (recognizedPoiList.length === 0 || currentPoiIndex >= recognizedPoiList.length) {
-      console.log('POI 소진, 초기화');
+  // ====== POI 제시 ======
+  const presentPoi = useCallback((list, index) => {
+    const poiList = list ?? recognizedPoiList;
+    const i = typeof index === 'number' ? index : currentPoiIndex;
+
+    if (!poiList || !poiList.length) {
+      speak('검색 결과가 없습니다. 다시 검색해 주세요.');
       resetNavigation();
-      Speech.speak('검색 결과가 없습니다. 다시 검색해 주세요.', { language: 'ko-KR' });
       return;
     }
-
-    const poiData = recognizedPoiList[currentPoiIndex];
-    const cityName = poiData.upperAddrName || '';
-    const locationInfo = cityName ? `${cityName}시에 위치한 ` : '';
-    const confirmMessage = `${locationInfo}${recognizedDestination}를 검색하신 것 맞으실까요? 맞으면 화면을 한 번, 틀리면 두 번 눌러주세요.`;
-    console.log('음성 안내 메시지:', confirmMessage);
-    Speech.speak(confirmMessage, { language: 'ko-KR' });
+    if (i >= poiList.length) {
+      speak('더 이상 검색 결과가 없습니다.');
+      resetNavigation();
+      return;
+    }
+    const poi = poiList[i];
+    const cityName = poi.upperAddrName || '';
+    const locationInfo = cityName ? `${cityName}에 위치한 ` : '';
+    speak(`${locationInfo}${poi.name}을 검색하신 것 맞으실까요? 맞으면 화면을 한 번, 틀리면 두 번 눌러주세요.`);
 
     if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
+    const lockedName = poi.name;
     confirmTimeoutRef.current = setTimeout(() => {
-      console.log('응답 시간 초과, 자동으로 검색 시작');
       setIsConfirmMode(false);
-      Speech.speak('시간이 초과되어 자동으로 검색을 시작합니다.', { language: 'ko-KR' });
-      if (typeof searchDestination === 'function') {
-        searchDestination(recognizedDestination);
-      } else {
-        handleSearchDestination(recognizedDestination);
-      }
+      speak('시간이 초과되어 자동으로 검색을 시작합니다.');
+      handleSearchDestination(lockedName, true);
     }, CONFIRM_TIMEOUT);
-  }, [recognizedPoiList, currentPoiIndex, recognizedDestination, resetNavigation, searchDestination]);
+  }, [recognizedPoiList, currentPoiIndex, resetNavigation, speak]);
 
-  // 음성 인식 결과 처리
-  const handleSpeechResult = async (result) => {
-    console.log('handleSpeechResult 호출 - 결과:', result);
-    if (result && result.trim() !== '') {
-      setRecognizedDestination(result);
-      setIsConfirmMode(true);
-      setCurrentPoiIndex(0); // 항상 0으로 초기화
-  
-      try {
-        setIsLoading(true);
-        const poiDataList = await getPoiCoordinates(result, safeUserLocation);
-        console.log('음성 인식 결과로 검색된 POI 데이터:', JSON.stringify(poiDataList));
-  
-        if (!Array.isArray(poiDataList) || poiDataList.length === 0) {
-          console.warn('POI 데이터가 유효하지 않음:', poiDataList);
-          Speech.speak('검색 결과가 없습니다.', { language: 'ko-KR' });
+  // ====== 음성/텍스트 공통 검색 시작 (네이버 검색) ======
+  const startQueryFlow = useCallback(async (query) => {
+    await waitForLocation();
+
+    setRecognizedDestination(query);
+    setIsConfirmMode(true);
+    setCurrentPoiIndex(0);
+    setRecognizedPoiList([]);
+
+    try {
+      setIsLoading(true);
+      let poiDataList = await getPoiCoordinates(query, safeUserLocation);
+
+      if (!Array.isArray(poiDataList) || poiDataList.length === 0) {
+        const adjusted = query.replace(/\s+/g, '');
+        poiDataList = await getPoiCoordinates(adjusted, safeUserLocation);
+        if (!poiDataList?.length) {
+          const keywords = query.split(' ');
+          for (const kw of keywords) {
+            if (kw.length > 1) {
+              // eslint-disable-next-line no-await-in-loop
+              poiDataList = await getPoiCoordinates(kw, safeUserLocation);
+              if (poiDataList?.length) break;
+            }
+          }
+        }
+        if (!poiDataList?.length) {
+          speak('검색 결과가 없습니다. 다시 시도해주세요.');
+          setIsConfirmMode(false);
           resetNavigation();
           return;
         }
-
-        const normalize = (str) => (str || '').replace(/\s+/g, '').trim();
-
-        let matchedPois = poiDataList.filter(
-          poi => normalize(poi.name) === normalize(result)
-        );
-        
-        if (matchedPois.length === 0) {
-          matchedPois = poiDataList.filter(
-            poi => normalize(poi.name).includes(normalize(result))
-          );
-        }
-        
-        if (matchedPois.length === 0) {
-          Speech.speak('정확한 장소를 찾을 수 없습니다.', { language: 'ko-KR' });
-          resetNavigation();
-          return;
-        }
-        
-        const sortedPoiList = matchedPois
-          .map(poi => ({
-            ...poi,
-            distance: safeUserLocation
-              ? calculateDistance(
-                  safeUserLocation.latitude,
-                  safeUserLocation.longitude,
-                  poi.latitude,
-                  poi.longitude
-                )
-              : Infinity,
-          }))
-          .sort((a, b) => a.distance - b.distance)
-          .slice(0, 3);
-        
-        setRecognizedPoiList(sortedPoiList);
-        setCurrentPoiIndex(0);
-      } catch (error) {
-        console.error('POI 검색 실패:', error);
-        Speech.speak('검색 중 오류가 발생했습니다.', { language: 'ko-KR' });
-        resetNavigation();
-      } finally {
-        setIsLoading(false);
       }
-    } else {
-      console.warn('유효하지 않은 음성 인식 결과:', result);
-      Speech.speak('인식된 결과가 없습니다.', { language: 'ko-KR' });
+
+      // 스코어링 정렬
+      const norm = (s) => (s || '').toString().trim().toLowerCase().replace(/\s+/g, '');
+      const hasSuffix = (q, kw) => new RegExp(`${kw}$`).test(q);
+      const landmarkSuffixes = ['역','공원','대학교','병원','구청','시청','터미널','공항','해수욕장','시장','백화점'];
+      const cityHints = ['부산','서울','인천','대구','대전','광주','울산','제주','수원','성남','용인','고양','창원'];
+      const qRaw = (query || '').trim();
+      const qn = norm(qRaw);
+
+      const scorePoi = (p) => {
+        const name = p?.name || '';
+        const addr = `${p?.upperAddrName || ''} ${p?.middleAddrName || ''} ${p?.lowerAddrName || ''} ${p?.fullAddress || ''}`;
+        const nn = norm(name);
+        const an = norm(addr);
+        let score = 0;
+
+        if (nn === qn) score += 100;
+        else if (nn.replace(/[^가-힣a-z0-9]/g, '') === qn.replace(/[^가-힣a-z0-9]/g, '')) score += 90;
+        else if (nn.includes(qn) && qn.length >= 2) score += 60;
+        else if (qn.includes(nn) && nn.length >= 2) score += 50;
+
+        for (const suf of landmarkSuffixes) {
+          if (hasSuffix(qRaw, suf) && name.includes(suf)) { score += 20; break; }
+        }
+        for (const c of cityHints) {
+          if (qRaw.includes(c) && addr.includes(c)) { score += 15; break; }
+        }
+
+        let dist = Infinity;
+        if (safeUserLocation) {
+          dist = calculateDistance(
+            safeUserLocation.latitude, safeUserLocation.longitude,
+            p.latitude, p.longitude
+          );
+          const distBoost = Math.max(0, 20 - Math.min(20, dist / 100));
+          score += distBoost;
+        }
+
+        return { ...p, __score: score, __dist: dist };
+      };
+
+      const enriched = poiDataList
+        .map((poi) => {
+          const v = validateAndFormatCoordinate(poi);
+          if (!v) return null;
+          return { ...poi, latitude: v.latitude, longitude: v.longitude };
+        })
+        .filter(Boolean)
+        .map(scorePoi)
+        .sort((a, b) => b.__score - a.__score || a.__dist - b.__dist);
+
+      const top3 = enriched.slice(0, 3);
+      if (!top3.length) {
+        speak('유효한 검색 결과가 없습니다.');
+        setIsConfirmMode(false);
+        resetNavigation();
+        return;
+      }
+
+      setRecognizedPoiList(top3);
+      presentPoi(top3, 0);
+    } catch (e) {
+      speak('검색 중 오류가 발생했습니다.');
+      setIsConfirmMode(false);
       resetNavigation();
+    } finally {
+      setIsLoading(false);
     }
+  }, [presentPoi, resetNavigation, safeUserLocation, speak, validateAndFormatCoordinate, waitForLocation]);
+
+  // ====== 음성 인식 결과 → 공통 플로우 ======
+  const handleSpeechResult = async (result) => {
+    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+    if (!result || !result.trim()) {
+      speak('인식된 결과가 없습니다.');
+      resetNavigation();
+      return;
+    }
+    await startQueryFlow(result.trim());
   };
 
-  // 확인 탭 처리
+  // ====== 확인 탭 처리 ======
   const handleConfirmTap = (tapCount) => {
-    console.log('handleConfirmTap 호출 - tapCount:', tapCount);
-    if (confirmTimeoutRef.current) {
-      clearTimeout(confirmTimeoutRef.current);
-      confirmTimeoutRef.current = null;
-    }
-  
+    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+
     if (tapCount === 1) {
-      console.log('단일 탭 - 검색 시작');
-      Speech.speak('검색을 시작합니다.', { language: 'ko-KR' });
-      if (typeof searchDestination === 'function') {
-        // 선택된 POI의 좌표를 전달
-        const selectedPoi = recognizedPoiList[currentPoiIndex];
-        if (selectedPoi) {
-          searchDestination(recognizedDestination, {
-            latitude: selectedPoi.latitude,
-            longitude: selectedPoi.longitude,
-          });
-        } else {
-          handleSearchDestination(recognizedDestination);
-        }
-      } else {
-        handleSearchDestination(recognizedDestination);
+      speak('검색을 시작합니다.');
+      const selectedPoi = recognizedPoiList[currentPoiIndex];
+      if (selectedPoi) {
+        handleSearchDestination(selectedPoi.name, true);
       }
       setIsConfirmMode(false);
       setIsGestureMode(false);
     } else if (tapCount === 2) {
-      console.log('더블 탭 - 다음 POI 또는 재검색');
       if (currentPoiIndex + 1 < recognizedPoiList.length) {
-        Speech.speak('다음 검색 결과를 확인합니다.', { language: 'ko-KR' });
-        setCurrentPoiIndex(prev => prev + 1);
-        presentPoi();
+        speak('다음 검색 결과를 확인합니다.');
+        const nextIdx = currentPoiIndex + 1;
+        setCurrentPoiIndex(nextIdx);
+        presentPoi(recognizedPoiList, nextIdx);
       } else {
-        Speech.speak('더 이상 검색 결과가 없습니다. 다시 검색해 주세요.', { language: 'ko-KR' });
+        speak('더 이상 검색 결과가 없습니다. 다시 검색해 주세요.');
         resetNavigation();
       }
     }
   };
 
-  // 목적지 검색 
-  const handleSearchDestination = async (query) => {
+  // ====== 목적지 확정/검색 ======
+  const handleSearchDestination = async (query, forceSelected = false) => {
     try {
+      if (navInFlightRef.current) return false;
       setIsLoading(true);
-      setIsRouteLoading(true);
-      console.log('내부 검색 함수로 목적지 검색:', query);
-  
-      let coordinates;
-      if (
-        recognizedPoiList.length > 0 &&
-        recognizedDestination === query &&
-        currentPoiIndex < recognizedPoiList.length
-      ) {
-        // 현재 인덱스의 단일 POI 가져오기
-        const selectedPoi = recognizedPoiList[currentPoiIndex];
-        coordinates = {
-          latitude: selectedPoi.latitude,
-          longitude: selectedPoi.longitude
-        };
-        console.log('저장된 POI 데이터 사용:', JSON.stringify(coordinates));
+
+      let coordinates = null;
+
+      if (forceSelected && recognizedPoiList.length && currentPoiIndex < recognizedPoiList.length) {
+        const sel = recognizedPoiList[currentPoiIndex];
+        coordinates = validateAndFormatCoordinate(sel);
       } else {
+        await waitForLocation();
         const poiDataList = await getPoiCoordinates(query, safeUserLocation);
-        if (poiDataList && poiDataList.length > 0) {
-          // 첫 번째 결과를 선택하고 위도와 경도만 추출
-          const selectedPoi = poiDataList[0];
-          coordinates = {
-            latitude: selectedPoi.latitude,
-            longitude: selectedPoi.longitude
-          };
-        } else {
-          coordinates = null;
-        }
-        console.log('검색 결과 좌표:', JSON.stringify(coordinates));
+        if (poiDataList?.length) coordinates = validateAndFormatCoordinate(poiDataList[0]);
       }
-  
-      if (coordinates && isValidLatLng(coordinates.latitude, coordinates.longitude)) {
-        console.log('목적지 유효함, 내비게이션 시작');
-        Speech.speak('목적지를 찾았습니다. 경로를 탐색합니다.', { language: 'ko-KR' });
+
+      if (coordinates) {
+        speak('목적지를 찾았습니다. 경로를 탐색합니다.');
         setSafeDestination(coordinates);
-        startNavigationWithZoom(coordinates);
+        didFitOnceRef.current = false;
+
+        navInFlightRef.current = true;
+        setTimeout(() => {
+          if (typeof startNavigation === 'function') {
+            startNavigation({ latitude: coordinates.latitude, longitude: coordinates.longitude });
+            if (typeof setIsNavigationMode === 'function') setIsNavigationMode(true);
+          } else if (typeof searchDestination === 'function') {
+            searchDestination(query, coordinates);
+          }
+          navInFlightRef.current = false;
+        }, 400);
+
         return true;
       } else {
-        console.log('유효하지 않은 목적지:', coordinates);
-        Speech.speak('목적지를 찾을 수 없습니다.', { language: 'ko-KR' });
+        speak('목적지를 찾을 수 없습니다.');
         return false;
       }
-    } catch (error) {
-      console.error('목적지 검색 오류:', error);
-      Speech.speak('검색 중 오류가 발생했습니다.', { language: 'ko-KR' });
+    } catch (e) {
+      speak('검색 중 오류가 발생했습니다.');
       return false;
     } finally {
       setIsLoading(false);
-      setIsRouteLoading(false);
     }
   };
 
-  // 내비게이션 시작 및 줌
-  const startNavigationWithZoom = (destination) => {
-    console.log('내비게이션 줌 시작:', destination);
-  
-    if (isGestureMode) {
-      setIsGestureMode(false);
-      stopListening();
-      stopSpeech();
-    }
-  
-    if (mapRef.current) {
-      try {
-        mapRef.current.animateToCoordinate(
-          {
-            latitude: destination.latitude,
-            longitude: destination.longitude,
-            zoom: 20,
-          },
-          1000
-        );
-        console.log('지도 애니메이션 실행됨');
-      } catch (error) {
-        console.error('지도 애니메이션 오류:', error);
-      }
-    }
-  
-    setTimeout(() => {
-      if (typeof startNavigation === 'function') {
-        console.log('내비게이션 시작 함수 호출');
-        startNavigation({ latitude: destination.latitude, longitude: destination.longitude });
-        setIsNavigating(true);
-        if (typeof setIsNavigationMode === 'function') {
-          setIsNavigationMode(true); // 경로 안내 모드 설정
-        }
-      }
-    }, 1500);
-  };
-
-  const handleMapError = (error) => {
-    console.error('지도 컴포넌트 오류:', error);
-    let errorMessage = '지도를 불러오는 중 오류가 발생했습니다.';
-    if (error.message.includes('network')) {
-      errorMessage = '네트워크 연결을 확인해주세요.';
-    } else if (error.message.includes('API')) {
-      errorMessage = '지도 서비스에 접속할 수 없습니다.';
-    }
-    setMapError({ message: errorMessage, details: error.toString() });
-  };
-
+  // ====== 하단 제스처 레이어 ======
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt, gestureState) => {
-        console.log('하단 영역 PanResponder granted');
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
+      onPanResponderGrant: () => {
         longPressTimeoutRef.current = setTimeout(() => {
           if (isConfirmMode) {
-            if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
-            setIsConfirmMode(false);
-            setIsGestureMode(false);
-            Speech.speak('확인되었습니다. 검색을 시작합니다.', { language: 'ko-KR' });
-            if (typeof searchDestination === 'function') {
-              searchDestination(recognizedDestination);
-            } else {
-              handleSearchDestination(recognizedDestination);
-            }
+            handleConfirmTap(1);
             return;
           }
-          if (!isGestureMode && !isNavigating) {
+          if (!isGestureMode && !isNavigationMode) {
             setIsGestureMode(true);
             setIsConfirmMode(false);
-            Speech.speak('목적지 검색 모드로 전환합니다.', { language: 'ko-KR' });
-            startListening();
-            startSpeech();
+            speak('목적지 검색 모드로 전환합니다.');
+            if (typeof startListening === 'function') startListening();
           }
         }, LONG_PRESS_DURATION);
       },
-      onPanResponderMove: (evt, gestureState) => {
-        if (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5) {
+      onPanResponderMove: (_, g) => {
+        if (Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5) {
           if (longPressTimeoutRef.current) {
             clearTimeout(longPressTimeoutRef.current);
             longPressTimeoutRef.current = null;
           }
         }
       },
-      onPanResponderRelease: (evt, gestureState) => {
-        console.log('터치 종료 감지');
+      onPanResponderRelease: (_, g) => {
         if (longPressTimeoutRef.current) {
           clearTimeout(longPressTimeoutRef.current);
           longPressTimeoutRef.current = null;
         }
-  
-        if (Math.abs(gestureState.dx) < 5 && Math.abs(gestureState.dy) < 5) {
+        if (Math.abs(g.dx) < 5 && Math.abs(g.dy) < 5) {
           const now = Date.now();
-          const timeSinceLastTap = now - (lastTapTimeRef.current || 0);
-          console.log('마지막 탭 이후 시간:', timeSinceLastTap, 'ms');
-  
-          if (timeSinceLastTap < DOUBLE_TAP_DELAY && lastTapTimeRef.current !== 0) {
-            console.log('더블 탭 감지');
+          const delta = now - lastTapTimeRef.current;
+          if (delta < DOUBLE_TAP_DELAY && lastTapTimeRef.current !== 0) {
             if (doubleTapTimeoutRef.current) {
               clearTimeout(doubleTapTimeoutRef.current);
               doubleTapTimeoutRef.current = null;
             }
-  
             if (isConfirmMode) {
               handleConfirmTap(2);
-            } else {
-              Speech.speak('일반 모드로 전환합니다.', { language: 'ko-KR' });
+            } else if (isNavigationMode) {
+              speak('내비게이션을 종료합니다.');
+              if (typeof stopNavigation === 'function') stopNavigation();
+              if (typeof setIsNavigationMode === 'function') setIsNavigationMode(false);
               resetNavigation();
             }
-  
             lastTapTimeRef.current = 0;
-            return;
           } else {
-            console.log('첫 탭 기록, 두 번째 탭 대기');
             lastTapTimeRef.current = now;
-  
-            if (doubleTapTimeoutRef.current) {
-              clearTimeout(doubleTapTimeoutRef.current);
-            }
-  
             doubleTapTimeoutRef.current = setTimeout(() => {
-              console.log('단일 탭 확인');
-              if (isConfirmMode) {
-                handleConfirmTap(1);
-              } else if (!isGestureMode && safeDestination) {
-                console.log('경로 안내 시작');
-                Speech.speak('경로 안내를 시작합니다.', { language: 'ko-KR' });
-                startNavigation(safeDestination);
-                setIsNavigationMode(true); // 경로 안내 모드 활성화 추가
-              }
+              if (isConfirmMode) handleConfirmTap(1);
               lastTapTimeRef.current = 0;
-              doubleTapTimeoutRef.current = null;
-            }, 500); // 0.5초로 변경 (기존 DOUBLE_TAP_DELAY 대신)
+            }, DOUBLE_TAP_DELAY);
           }
         }
       },
+      onPanResponderTerminationRequest: () => true,
       onPanResponderTerminate: () => {
-        console.log('하단 영역 PanResponder terminated');
         if (longPressTimeoutRef.current) {
           clearTimeout(longPressTimeoutRef.current);
           longPressTimeoutRef.current = null;
@@ -508,521 +431,305 @@ const MapView = ({
     })
   ).current;
 
-  const handleMapClick = (e) => {
-    console.log('Map clicked', e);
-    if (e && isValidLatLng(e.latitude, e.longitude)) {
-      console.log('Valid map click at:', { latitude: e.latitude, longitude: e.longitude });
-    }
-  };
-
-  // 사용자 위치 검증
+  // ====== User Location ======
   useEffect(() => {
-    if (userLocation) {
-      console.log('Raw user location:', JSON.stringify(userLocation));
-      const formattedLocation = formatCoordinate(userLocation);
-      if (formattedLocation) {
-        setSafeUserLocation(formattedLocation);
-        console.log('User location formatted:', formattedLocation);
-      } else {
-        console.warn('Invalid user location, using default');
-        setSafeUserLocation(DEFAULT_LOCATION);
-      }
+    const formatted = validateAndFormatCoordinate(userLocation);
+    setSafeUserLocation(formatted || DEFAULT_LOCATION);
+  }, [userLocation, validateAndFormatCoordinate]);
+
+  // ====== Route & Destination ======
+  useEffect(() => {
+    if (route) {
+      setSafeWalkRoute(validateRouteArray(route.walk || []));
+      setSafeSubwayRoute(validateRouteArray(route.subway || []));
+      setSafeBusRoute(validateRouteArray(route.bus || []));
     } else {
-      setSafeUserLocation(DEFAULT_LOCATION);
-    }
-  }, [userLocation]);
-
-    // 내비게이션 모드 상태를 감시하는 useEffect 추가
-    useEffect(() => {
-      if (isNavigationMode) {
-        console.log('경로 안내 모드로 전환됨');
-        // 필요한 경우 여기에 추가 설정 가능
-      } else {
-        console.log('경로 안내 모드 해제됨');
-      }
-    }, [isNavigationMode]);
-
-  // 경로와 목적지 검증
-  useEffect(() => {
-    try {
-      if (route) {
-        console.log('Raw route data:', JSON.stringify(route));
-        const validatedWalkRoute = route.walk?.map(formatCoordinate).filter(coord => coord) || [];
-        console.log(`Walk route: ${route.walk?.length || 0} points -> ${validatedWalkRoute.length} valid points`);
-        setSafeWalkRoute(validatedWalkRoute);
-  
-        const validatedSubwayRoute = route.subway?.map(formatCoordinate).filter(coord => coord) || [];
-        console.log(`Subway route: ${route.subway?.length || 0} points -> ${validatedSubwayRoute.length} valid points`);
-        setSafeSubwayRoute(validatedSubwayRoute);
-  
-        const validatedBusRoute = route.bus?.map(formatCoordinate).filter(coord => coord) || [];
-        console.log(`Bus route: ${route.bus?.length || 0} points -> ${validatedBusRoute.length} valid points`);
-        setSafeBusRoute(validatedBusRoute);
-      } else {
-        setSafeWalkRoute([]);
-        setSafeSubwayRoute([]);
-        setSafeBusRoute([]);
-      }
-  
-      if (destination) {
-        console.log('Raw destination data:', JSON.stringify(destination));
-        const formattedDest = formatCoordinate(destination);
-        console.log('Formatted destination:', formattedDest);
-        if (!formattedDest) {
-          console.warn('목적지 형식이 잘못되어 null로 설정');
-        }
-        setSafeDestination(formattedDest);
-      } else {
-        console.log('목적지가 제공되지 않음, null로 설정');
-        setSafeDestination(null);
-      }
-    } catch (error) {
-      console.error('경로 검증 중 오류 발생:', error);
       setSafeWalkRoute([]);
       setSafeSubwayRoute([]);
       setSafeBusRoute([]);
+    }
+
+    if (destination) {
+      const d = validateAndFormatCoordinate(destination);
+      setSafeDestination(d);
+      if (d) didFitOnceRef.current = false;
+    } else {
       setSafeDestination(null);
     }
-  }, [route, destination]);
+  }, [route, destination, validateRouteArray, validateAndFormatCoordinate]);
 
-  // 내비게이션 모드 설정
+  // ====== Instructions (dedupe) ======
   useEffect(() => {
-    if (route && (safeWalkRoute.length > 0 || safeSubwayRoute.length > 0 || safeBusRoute.length > 0)) {
-      setIsNavigating(true);
-    } else {
-      setIsNavigating(false);
-    }
-  }, [safeWalkRoute, safeSubwayRoute, safeBusRoute, route]);
-
-  // 안내 지점 검증
-  useEffect(() => {
-    if (instructions && Array.isArray(instructions)) {
-      console.log('Raw instructions data:', JSON.stringify(instructions));
-      const validInstructions = instructions
-        .map((instruction, index) => {
-          if (!instruction || !instruction.position) {
-            console.warn(`Instruction at index ${index} is invalid or missing position`, instruction);
-            return null;
-          }
-          const validPosition = formatCoordinate(instruction.position);
-          if (!validPosition) {
-            console.warn(`Invalid position for instruction at index ${index}`, instruction.position);
-            return null;
-          }
-          return { ...instruction, position: validPosition };
-        })
-        .filter(instruction => instruction !== null);
-      console.log(`Instructions validated: ${instructions.length} total -> ${validInstructions.length} valid positions`);
-      setSafeInstructions(validInstructions);
-    } else {
-      console.log('No valid instructions provided');
+    if (!Array.isArray(instructions)) {
       setSafeInstructions([]);
+      return;
     }
-  }, [instructions]);
-
-  // 음성 인식 결과 처리
-  useEffect(() => {
-    if (onSpeechResult) {
-      onSpeechResult(handleSpeechResult);
+    const seen = new Set();
+    const out = [];
+    for (const ins of instructions) {
+      if (!ins || !ins.position) continue;
+      const pos = validateAndFormatCoordinate(ins.position);
+      if (!pos) continue;
+      const desc = ins.description || '';
+      const key = `${pos.latitude.toFixed(6)}:${pos.longitude.toFixed(6)}:${desc}:${ins.type || ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...ins, position: pos, description: desc });
     }
-  }, [onSpeechResult]);
+    setSafeInstructions(out);
+  }, [instructions, validateAndFormatCoordinate]);
 
-  // 컴포넌트 마운트/언마운트
+  // ====== unified path 만들기 (대중교통 경로인 경우) ======
   useEffect(() => {
-    console.log('MapView component mounted');
+    // 대중교통이면 route.bus 또는 route.subway에 좌표가 존재
+    const isTransit =
+      (safeBusRoute && safeBusRoute.length >= 2) ||
+      (safeSubwayRoute && safeSubwayRoute.length >= 2);
+
+    if (!isTransit) {
+      setUnifiedTransitPath([]);
+      return;
+    }
+
+    // instructions 순서대로 모드 전환하며 각 모드의 path를 차례대로 소비
+    // 세부 segment id가 없기 때문에, 각 모드 배열을 포인터로 순차 소비하는 휴리스틱 적용
+    const walk = Array.isArray(safeWalkRoute) ? safeWalkRoute : [];
+    const bus = Array.isArray(safeBusRoute) ? safeBusRoute : [];
+    const subway = Array.isArray(safeSubwayRoute) ? safeSubwayRoute : [];
+
+    let wIdx = 0;
+    let bIdx = 0;
+    let sIdx = 0;
+
+    const concatChunk = (arr, idxRef, count = 999999) => {
+      const out = [];
+      let used = 0;
+      while (idxRef.value < arr.length && used < count) {
+        out.push(arr[idxRef.value]);
+        idxRef.value += 1;
+        used += 1;
+      }
+      return out;
+    };
+
+    const addUntilNextStop = (mode, positions) => {
+      // 기본은 남은 전부 소비. (세분화 정보 없으므로)
+      if (mode === 'walk') return positions.concat(concatChunk(walk, { value: wIdx }));
+      if (mode === 'bus') return positions.concat(concatChunk(bus, { value: bIdx }));
+      if (mode === 'subway') return positions.concat(concatChunk(subway, { value: sIdx }));
+      return positions;
+    };
+
+    let path = [];
+    let currentMode = null;
+
+    for (const step of safeInstructions) {
+      if (step.type === 'bus') {
+        if (currentMode !== 'bus') currentMode = 'bus';
+        path = addUntilNextStop('bus', path);
+      } else if (step.type === 'subway') {
+        if (currentMode !== 'subway') currentMode = 'subway';
+        path = addUntilNextStop('subway', path);
+      } else {
+        // start / direction / crosswalk / destination 등은 도보 모드로 취급
+        if (currentMode !== 'walk') currentMode = 'walk';
+        path = addUntilNextStop('walk', path);
+      }
+    }
+
+    // 마지막 안전 처리: 아무 것도 못 붙였으면(데이터 편차 대비) 모든 모드 순차 연결
+    if (path.length < 2) {
+      path = [...walk, ...bus, ...subway];
+    }
+
+    // 중복 제거
+    path = dedupeSequentialCoords(path);
+    setUnifiedTransitPath(path);
+  }, [safeInstructions, safeWalkRoute, safeBusRoute, safeSubwayRoute, dedupeSequentialCoords]);
+
+  // ====== recognizedText → 공통 플로우 ======
+  useEffect(() => {
+    if (recognizedText && recognizedText.trim()) {
+      if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+      startQueryFlow(recognizedText.trim());
+    }
+  }, [recognizedText, startQueryFlow]);
+
+  // ====== Unmount cleanup ======
+  useEffect(() => {
     return () => {
-      console.log('MapView component unmounting, clearing timers');
       if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
       if (doubleTapTimeoutRef.current) clearTimeout(doubleTapTimeoutRef.current);
       if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
+      if (followCamTimer.current) clearTimeout(followCamTimer.current);
+      Speech.stop();
     };
   }, []);
 
-  // 제스처 모드 로그
+  // ====== Follow Camera ======
   useEffect(() => {
-    console.log('Gesture mode 상태 변경됨:', isGestureMode ? 'ON' : 'OFF');
-    if (!isGestureMode) {
-      console.log('음성 검색 모드 해제됨');
-    }
-  }, [isGestureMode]);
+    if (!isNavigationMode || !safeUserLocation || !mapRef.current) return;
+    if (followCamTimer.current) return;
+    followCamTimer.current = setTimeout(() => {
+      followCamTimer.current = null;
+      try {
+        mapRef.current.animateCamera?.(
+          {
+            latitude: safeUserLocation.latitude,
+            longitude: safeUserLocation.longitude,
+            zoom: 17,
+            tilt: 30,
+            bearing: 0,
+          },
+          600
+        );
+      } catch {}
+    }, 450);
+  }, [safeUserLocation, isNavigationMode]);
 
-  // 확인 모드 로그
+  // ====== Fit-once after route received ======
   useEffect(() => {
-    console.log('Confirm mode changed:', isConfirmMode ? 'ON' : 'OFF');
-  }, [isConfirmMode]);
+    const all = unifiedTransitPath.length >= 2
+      ? unifiedTransitPath
+      : [...safeWalkRoute, ...safeSubwayRoute, ...safeBusRoute];
 
-  // 내비게이션 모드 상태를 감시하는 useEffect 추가
-  useEffect(() => {
-    if (isNavigationMode && safeUserLocation && safeDestination) {
-      console.log('경로 안내 모드로 전환됨, 상세 경로 요청');
-      fetchNaverDirections();
-    } else if (!isNavigationMode) {
-      console.log('경로 안내 모드 해제됨');
-      // 네이버 경로 데이터 초기화
-      setNaverGuides([]);
-      setCurrentGuideIndex(0);
-      setNaverDirectionSummary(null);
-      setNaverPath([]);
-    }
-  }, [isNavigationMode, safeUserLocation, safeDestination]);
+    if (!all.length || !mapRef.current) return;
+    if (didFitOnceRef.current) return;
+    didFitOnceRef.current = true;
 
-  useEffect(() => {
-    if (
-      isConfirmMode &&
-      recognizedPoiList.length > 0 &&
-      currentPoiIndex < recognizedPoiList.length
-    ) {
-      presentPoi();
-    }
-  }, [recognizedPoiList, currentPoiIndex, isConfirmMode]);
+    const minLat = Math.min(...all.map((p) => p.latitude));
+    const maxLat = Math.max(...all.map((p) => p.latitude));
+    const minLng = Math.min(...all.map((p) => p.longitude));
+    const maxLng = Math.max(...all.map((p) => p.longitude));
+    const center = {
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLng + maxLng) / 2,
+    };
 
-  // 마커 아이콘
-  const getMarkerImageForType = (type) => {
-    switch (type) {
-      case 'crosswalk':
-        return require('../../assets/images/crosswalk_icon.png');
-      case 'subway':
-        return require('../../assets/images/subway_icon.png');
-      case 'bus':
-        return require('../../assets/images/bus_icon.png');
-      case 'stairs':
-        return require('../../assets/images/stairs_icon.png');
-      case 'overpass':
-        return require('../../assets/images/overpass_icon.png');
-      case 'underground':
-        return require('../../assets/images/underground_icon.png');
-      case 'ramp':
-        return require('../../assets/images/ramp_icon.png');
-      case 'stairsramp':
-        return require('../../assets/images/stairsramp_icon.png');
-      case 'left':
-        return require('../../assets/images/left_icon.png');
-      case 'right':
-        return require('../../assets/images/right_icon.png');
-      case 'straight':
-        return require('../../assets/images/straight_icon.png');
-      case 'destination':
-        return require('../../assets/images/destination_icon.png');
-      default:
-        return require('../../assets/images/direction_icon.png');
-    }
-  };
+    try {
+      mapRef.current.animateCamera?.({ ...center, zoom: 15, tilt: 0, bearing: 0 }, 600);
+    } catch {}
+  }, [safeWalkRoute, safeSubwayRoute, safeBusRoute, unifiedTransitPath]);
 
-  // 네이버 상세 경로 정보 가져오기
-const fetchNaverDirections = async () => {
-  try {
-    setIsLoading(true);
-    console.log('Naver 보행자 경로 API 호출 시작');
-    
-    const naverDirectionsData = await getDirections(
-      safeUserLocation, 
-      safeDestination, 
-      { isWalking: true, includeDetails: true }
-    );
-    
-    console.log('Naver 보행자 경로 안내 정보 수신:',
-      naverDirectionsData.guides.length, '개 안내,',
-      naverDirectionsData.path.length, '개 경로 좌표');
-    
-    setNaverPath(naverDirectionsData.path);
-    setNaverGuides(naverDirectionsData.guides);
-    setNaverDirectionSummary(naverDirectionsData.summary);
-    setCurrentGuideIndex(0);
-    
-    // 첫 번째 안내 음성 출력 부분 수정
-    if (naverDirectionsData.guides && naverDirectionsData.guides.length > 0) {
-      const firstGuide = naverDirectionsData.guides[0];
-      const dirDesc = getDirectionDescription(naverDirectionsData.summary.goal.dir);
-      
-      // TMap API에서 가져온 경로 정보 활용
-      let transportMessage = '';
-      
-      if (route) {
-        if (route.walk && route.walk.length > 0 && route.walkDuration) {
-          transportMessage += `목적지까지 도보로 약 ${Math.ceil(route.walkDuration / 60)}분, `;
-        }
-        
-        if (route.bus && route.bus.length > 0 && route.busInfo) {
-          transportMessage += `${route.busInfo.routeName || '버스'}로 약 ${Math.ceil(route.busInfo.duration / 60)}분, `;
-        }
-        
-        if (route.subway && route.subway.length > 0 && route.subwayInfo) {
-          transportMessage += `${route.subwayInfo.routeName || '지하철'}로 약 ${Math.ceil(route.subwayInfo.duration / 60)}분, `;
-        }
-      } else {
-        // 기본 네이버 경로 정보 활용
-        transportMessage = `목적지까지 도보로 약 ${getDistanceText(naverDirectionsData.summary.distance)}, `;
-      }
-      
-      Speech.speak(
-        `${transportMessage}${dirDesc} 방향으로 이동하세요.`,
-        { language: 'ko-KR' }
-      );a
-    }
-  } catch (error) {
-    console.error('Naver 상세 경로 정보 가져오기 실패:', error);
-    Speech.speak('경로 정보를 가져오는데 실패했습니다.', { language: 'ko-KR' });
-  } finally {
-    setIsLoading(false);
-  }
-};
+  // ====== 어떤 경로를 그릴지 결정 ======
+  const renderMode = useMemo(() => {
+    const hasTransit = (safeBusRoute.length >= 2) || (safeSubwayRoute.length >= 2);
+    if (hasTransit) return 'transit'; // 파란색 단일 경로
+    if (safeWalkRoute.length >= 2) return 'walk'; // 초록색
+    return 'none';
+  }, [safeWalkRoute, safeBusRoute, safeSubwayRoute]);
 
-// 방향 설명 함수
-const getDirectionDescription = (dir) => {
-  switch(dir) {
-    case 0: return '전방';
-    case 1: return '왼쪽';
-    case 2: return '오른쪽';
-    default: return '전방';
-  }
-};
-
-// 거리 포맷팅 함수
-const getDistanceText = (distanceInMeters) => {
-  if (distanceInMeters >= 1000) {
-    return `${(distanceInMeters / 1000).toFixed(1)}km`;
-  }
-  return `${distanceInMeters}m`;
-};
-
-// 현재 사용자 위치에 따른 안내 처리
-useEffect(() => {
-  if (isNavigationMode && naverGuides.length > 0 && safeUserLocation) {
-    checkCurrentNaverGuide();
-  }
-}, [safeUserLocation, isNavigationMode, naverGuides, currentGuideIndex]);
-
-// 현재 네이버 안내 확인 함수
-const checkCurrentNaverGuide = () => {
-  if (!isNavigationMode || naverGuides.length === 0 || currentGuideIndex >= naverGuides.length) {
-    return;
-  }
-  
-  const currentGuide = naverGuides[currentGuideIndex];
-  if (!currentGuide || !currentGuide.position) return;
-  
-  // 현재 위치와 안내 지점 사이의 거리 계산
-  const distance = calculateDistance(
-    safeUserLocation.latitude,
-    safeUserLocation.longitude,
-    currentGuide.position.latitude,
-    currentGuide.position.longitude
-  );
-  
-  // 보행자는 20m 이내로 접근하면 안내 음성 재생
-  if (distance <= 20) {
-    Speech.speak(currentGuide.instructions || '안내 정보가 없습니다.', { language: 'ko-KR' });
-    
-    // 다음 안내로 이동
-    if (currentGuideIndex + 1 < naverGuides.length) {
-      setCurrentGuideIndex(currentGuideIndex + 1);
-      
-      // 다음 안내 미리 준비
-      const nextGuide = naverGuides[currentGuideIndex + 1];
-      if (nextGuide && nextGuide.distance) {
-        setTimeout(() => {
-          const nextGuideType = guideTypeToKorean(nextGuide.type);
-          Speech.speak(`${getDistanceText(nextGuide.distance)} 앞 ${nextGuideType}입니다.`, 
-            { language: 'ko-KR' });
-        }, 3000); // 3초 후 다음 안내 미리 알림
-      }
-    } else if (currentGuideIndex + 1 === naverGuides.length) {
-      // 마지막 안내일 경우
-      Speech.speak('목적지에 도착했습니다.', { language: 'ko-KR' });
-      setIsNavigationMode(false);
-    }
-  }
-};
-
-// 안내 유형에 따른 한글 변환
-const guideTypeToKorean = (type) => {
-  switch(type) {
-    case 'CROSSWALK': return '횡단보도';
-    case 'TURNPOINT': return '회전 지점';
-    case 'POINT': return '안내 지점';
-    case 'JUNCTION': return '교차로';
-    case 'STRAIGHT': return '직진';
-    case 'LEFT': 
-    case 'TURN_LEFT': return '좌회전';
-    case 'RIGHT':
-    case 'TURN_RIGHT': return '우회전';
-    case 'DESTINATION': return '목적지';
-    default: return '안내 지점';
-  }
-};
-
-  // 로딩 화면
+  // ====== UI ======
   if (!safeUserLocation) {
     return (
       <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#0000ff" />
         <Text>위치 정보를 불러오는 중입니다...</Text>
       </View>
     );
   }
 
-  // 오류 화면
   if (mapError) {
     return (
       <View style={styles.errorContainer}>
         <Text style={styles.errorText}>{mapError.message}</Text>
-        <Text style={styles.errorSubtext}>{mapError.details}</Text>
-        <Button title="재시도" onPress={() => setMapError(null)} />
       </View>
     );
   }
-
-  // 카메라 설정
-  const cameraPosition = {
-    latitude: safeUserLocation.latitude,
-    longitude: safeUserLocation.longitude,
-    zoom: 16.5,
-    tilt: 45,
-    bearing: 0,
-  };
 
   return (
     <View style={styles.mapContainer}>
       <NaverMapView
         ref={mapRef}
         style={styles.map}
-        camera={cameraPosition}
-        isShowLocationButton={true}
-        isZoomGesturesEnabled={true}
-        isScrollGesturesEnabled={true}
-        isRotateGesturesEnabled={true}
-        isTiltGesturesEnabled={true}
-        isShowCompass={true}
-        onTapMap={handleMapClick}
-        onError={handleMapError}
-        layerGroups={{
-          BICYCLE: false,
-          BUILDING: true,
-          CADASTRAL: false,
-          MOUNTAIN: false,
-          TRAFFIC: false,
-          TRANSIT: true,
+        initialCamera={{
+          latitude: safeUserLocation.latitude,
+          longitude: safeUserLocation.longitude,
+          zoom: 16.5,
+          tilt: 0,
+          bearing: 0,
         }}
+        mapType="Basic"
+        isShowLocationButton={true}
+        isShowCompass={true}
+        isShowScaleBar={false}
+        isShowZoomControls={false}
+        isShowIndoorLevelPicker={false}
+        locationButtonStyle={{ position: 'absolute', bottom: 20, right: 20 }}
+        onError={() => setMapError({ message: '지도 로딩 중 오류가 발생했습니다.' })}
       >
-        {/* TMap API 경로 (보행자, 지하철, 버스) */}
-        {safeWalkRoute.length >= 2 &&
-          safeWalkRoute.every(coord => isValidLatLng(coord.latitude, coord.longitude)) && (
-            <NaverMapPathOverlay
-              coords={safeWalkRoute}
-              width={10}
-              color="#4CAF50"
-              pattern={[10, 10]}
-              outlineWidth={0}
-            />
-          )}
-        {safeSubwayRoute.length >= 2 &&
-          safeSubwayRoute.every(coord => isValidLatLng(coord.latitude, coord.longitude)) && (
-            <NaverMapPathOverlay
-              coords={safeSubwayRoute}
-              width={10}
-              color="#F06A00"
-              outlineWidth={2}
-              outlineColor="#FFFFFF"
-            />
-          )}
-        {safeBusRoute.length >= 2 &&
-          safeBusRoute.every(coord => isValidLatLng(coord.latitude, coord.longitude)) && (
-            <NaverMapPathOverlay
-              coords={safeBusRoute}
-              width={10}
-              color="#3BB548"
-              outlineWidth={2}
-              outlineColor="#FFFFFF"
-            />
-          )}
-        
-        {/* 네이버 Direction5 내비게이션 모드 경로 */}
-        {isNavigationMode && naverPath.length >= 2 && (
+        {/* ====== 단일 경로만 그림 ====== */}
+        {renderMode === 'walk' && safeWalkRoute.length >= 2 && (
           <NaverMapPathOverlay
-            coords={naverPath}
-            width={6}
-            color="#4CAF50" // 내비게이션 경로 색상
-            outlineWidth={1}
-            outlineColor="#FFFFFF"
+            coords={safeWalkRoute}
+            width={8}
+            color={'green'}
+            outlineWidth={2}
+            outlineColor={'white'}
           />
         )}
-        
-        {/* 네이버 내비게이션 안내 지점 */}
-        {isNavigationMode && naverGuides.length > 0 && naverGuides.map((guide, index) => {
-          if (!guide.position) return null;
-          return (
-            <NaverMapMarkerOverlay
-              key={`naver-guide-${index}`}
-              latitude={guide.position.latitude}
-              longitude={guide.position.longitude}
-              width={24}
-              height={24}
-              anchor={{ x: 0.5, y: 0.5 }}
-              // image={getMarkerImageForNaverGuideType(guide.type)}
-              onClick={() => Speech.speak(guide.instructions || '안내 정보가 없습니다.', { language: 'ko-KR' })}
-            />
-          );
-        })}
-        
-        {safeDestination && isValidLatLng(safeDestination.latitude, safeDestination.longitude) && (
+
+        {renderMode === 'transit' && unifiedTransitPath.length >= 2 && (
+          <NaverMapPathOverlay
+            coords={unifiedTransitPath}
+            width={8}
+            color={'blue'}
+            outlineWidth={2}
+            outlineColor={'white'}
+          />
+        )}
+
+        {/* 목적지 */}
+        {safeDestination && (
           <NaverMapMarkerOverlay
             latitude={safeDestination.latitude}
             longitude={safeDestination.longitude}
-            width={24}
-            height={24}
+            width={30}
+            height={30}
             anchor={{ x: 0.5, y: 1 }}
-            image={require('../../assets/images/destination_icon.png')}
-            onClick={() => Speech.speak('목적지입니다.', { language: 'ko-KR' })}
+            caption={{ text: '목적지' }}
+            onTap={() => speak('목적지입니다.')}
           />
         )}
-        
-        {/* 기존 안내 정보 마커 */}
-        {safeInstructions.length > 0 &&
-          safeInstructions.map((instruction, index) => {
-            if (!instruction.position || !isValidLatLng(instruction.position.latitude, instruction.position.longitude)) {
-              console.warn(`Skipping invalid instruction at index ${index}`, instruction);
-              return null;
-            }
-            return (
-              <NaverMapMarkerOverlay
-                key={`instruction-${index}`}
-                latitude={instruction.position.latitude}
-                longitude={instruction.position.longitude}
-                width={24}
-                height={24}
-                anchor={{ x: 0.5, y: 0.5 }}
-                image={getMarkerImageForType(instruction.type)}
-                onClick={() => Speech.speak(instruction.description || '안내 정보가 없습니다', { language: 'ko-KR' })}
-              />
-            );
-          })}
+
+        {/* 안내 포인트 (중복 제거됨) */}
+        {safeInstructions.map((instruction, idx) => (
+          <NaverMapMarkerOverlay
+            key={`ins-${instruction.position.latitude}-${instruction.position.longitude}-${idx}`}
+            latitude={instruction.position.latitude}
+            longitude={instruction.position.longitude}
+            width={24}
+            height={24}
+            anchor={{ x: 0.5, y: 0.5 }}
+            onTap={() => speak(instruction.description || '안내 정보가 없습니다')}
+          />
+        ))}
       </NaverMapView>
 
+      {/* 하단 제스처 레이어 */}
       <View
         style={[
           styles.gestureOverlay,
           {
             top: halfScreenHeight,
             height: halfScreenHeight,
-            backgroundColor: isGestureMode ? 'rgba(0, 0, 0, 0.05)' : 'transparent',
+            backgroundColor: isGestureMode ? 'rgba(0, 0, 0, 0.04)' : 'transparent',
           },
         ]}
+        pointerEvents={testInputVisible || isConfirmMode ? 'none' : 'auto'}
+        collapsable={false}
         {...panResponder.panHandlers}
       />
 
+      {/* Loading */}
       {isLoading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color="#0000ff" />
-          <Text style={styles.loadingText}>목적지를 검색하는 중입니다...</Text>
+          <Text style={styles.loadingText}>검색 중입니다...</Text>
         </View>
       )}
 
-      {isRouteLoading && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#0000ff" />
-          <Text style={styles.loadingText}>경로를 계산하는 중입니다...</Text>
-        </View>
-      )}
-
+      {/* Mode pill */}
       <View
         style={[
           styles.modeIndicator,
@@ -1031,17 +738,24 @@ const guideTypeToKorean = (type) => {
               ? 'rgba(255, 153, 0, 0.9)'
               : isGestureMode
               ? 'rgba(0, 120, 255, 0.9)'
-              : isNavigationMode || isNavigating
+              : isNavigationMode
               ? 'rgba(0, 176, 80, 0.9)'
               : 'rgba(0, 0, 0, 0.7)',
           },
         ]}
       >
-      <Text style={styles.modeText}>
-        {isConfirmMode ? '확인 모드' : isGestureMode ? '음성 검색 모드' : (isNavigating || isNavigationMode) ? '경로 안내 모드' : '일반 모드'}
-      </Text>
+        <Text style={styles.modeText}>
+          {isConfirmMode
+            ? '확인 모드'
+            : isGestureMode
+            ? '음성 검색 모드'
+            : isNavigationMode
+            ? '경로 안내 모드'
+            : '일반 모드'}
+        </Text>
       </View>
 
+      {/* Confirm banner */}
       {isConfirmMode && recognizedDestination && (
         <View style={styles.confirmContainer}>
           <Text style={styles.confirmText}>"{recognizedDestination}"으로 안내할까요?</Text>
@@ -1049,9 +763,67 @@ const guideTypeToKorean = (type) => {
         </View>
       )}
 
-      {nextInstruction && !isConfirmMode && (
-        <View style={styles.nextInstructionContainer}>
-          <Text style={styles.nextInstructionText}>{nextInstruction.description || '다음 안내'}</Text>
+      {/* ==== Test UI ==== */}
+      <TouchableOpacity
+        style={styles.testToggleButton}
+        onPress={() => setTestInputVisible(!testInputVisible)}
+      >
+        <Text style={styles.testToggleText}>TEST</Text>
+      </TouchableOpacity>
+
+      {testInputVisible && (
+        <View style={styles.testInputContainer}>
+          <Text style={styles.testLabel}>테스트 목적지 입력:</Text>
+          <TextInput
+            style={styles.testInput}
+            value={testDestination}
+            onChangeText={setTestDestination}
+            placeholder="예: 부산역, 해운대해수욕장"
+            placeholderTextColor="#999"
+          />
+          <View style={styles.testButtonContainer}>
+            <TouchableOpacity
+              style={styles.testButton}
+              onPress={async () => {
+                if (testDestination.trim()) {
+                  if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+                  await startQueryFlow(testDestination.trim());
+                  setTestDestination('');
+                  setTestInputVisible(false);
+                }
+              }}
+            >
+              <Text style={styles.testButtonText}>검색</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.testButton, styles.testButtonSecondary]}
+              onPress={() => {
+                setTestDestination('');
+                setTestInputVisible(false);
+              }}
+            >
+              <Text style={styles.testButtonText}>취소</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.quickSearchContainer}>
+            <Text style={styles.quickSearchLabel}>빠른 검색:</Text>
+            <View style={styles.quickSearchButtons}>
+              {['부산역', '해운대해수욕장', '센텀시티', '광안리해수욕장'].map((q) => (
+                <TouchableOpacity
+                  key={q}
+                  style={styles.quickSearchButton}
+                  onPress={async () => {
+                    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+                    await startQueryFlow(q);
+                    setTestInputVisible(false);
+                  }}
+                >
+                  <Text style={styles.quickSearchText}>{q}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
         </View>
       )}
     </View>
@@ -1059,117 +831,71 @@ const guideTypeToKorean = (type) => {
 };
 
 const styles = StyleSheet.create({
-  mapContainer: {
-    flex: 1,
-    width: '100%',
-    position: 'relative',
-  },
-  map: {
-    flex: 1,
-    width: '100%',
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  mapContainer: { flex: 1, width: '100%', position: 'relative' },
+  map: { flex: 1, width: '100%', position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f5f5f5' },
   loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 20,
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 20,
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: '#333',
-  },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-    backgroundColor: '#f8f8f8',
-  },
-  errorText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#d32f2f',
-    marginBottom: 8,
-  },
-  errorSubtext: {
-    fontSize: 14,
-    color: '#666',
-    textAlign: 'center',
-  },
+  loadingText: { marginTop: 10, fontSize: 16, color: '#333', fontWeight: '500' },
+
+  errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20, backgroundColor: '#f8f8f8' },
+  errorText: { fontSize: 16, fontWeight: 'bold', color: '#d32f2f', textAlign: 'center' },
+
   modeIndicator: {
-    position: 'absolute',
-    top: 20,
-    alignSelf: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 15,
-    borderRadius: 20,
-    zIndex: 10,
+    position: 'absolute', top: 20, alignSelf: 'center',
+    paddingVertical: 8, paddingHorizontal: 15, borderRadius: 20, zIndex: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5,
   },
-  modeText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  gestureOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 5,
-  },
+  modeText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
+
+  gestureOverlay: { position: 'absolute', left: 0, right: 0, zIndex: 50, elevation: 50 },
+
   confirmContainer: {
-    position: 'absolute',
-    top: 80,
-    left: 20,
-    right: 20,
-    backgroundColor: 'rgba(66, 133, 244, 0.9)',
-    padding: 15,
-    borderRadius: 10,
-    zIndex: 15,
+    position: 'absolute', top: 80, left: 20, right: 20,
+    backgroundColor: 'rgba(66, 133, 244, 0.9)', padding: 15, borderRadius: 10, zIndex: 15,
     alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5,
   },
-  confirmText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 8,
+  confirmText: { color: 'white', fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
+  confirmSubtext: { color: 'white', fontSize: 14, textAlign: 'center' },
+
+  // Test UI
+  testToggleButton: {
+    position: 'absolute', bottom: 100, right: 20,
+    width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 0, 0, 0.8)',
+    justifyContent: 'center', alignItems: 'center', zIndex: 100, elevation: 100,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
   },
-  confirmSubtext: {
-    color: 'white',
-    fontSize: 14,
-    textAlign: 'center',
+  testToggleText: { color: 'white', fontSize: 12, fontWeight: 'bold' },
+  testInputContainer: {
+    position: 'absolute', bottom: 160, left: 20, right: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)', padding: 15, borderRadius: 10,
+    zIndex: 99, elevation: 99,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
   },
-  nextInstructionContainer: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    padding: 15,
-    borderRadius: 10,
-    zIndex: 10,
+  testLabel: { fontSize: 14, fontWeight: 'bold', marginBottom: 5, color: '#333' },
+  testInput: {
+    height: 40, borderWidth: 1, borderColor: '#ddd', borderRadius: 5,
+    paddingHorizontal: 10, marginBottom: 10, backgroundColor: 'white', fontSize: 16,
   },
-  nextInstructionText: {
-    color: 'white',
-    fontSize: 16,
-    textAlign: 'center',
+  testButtonContainer: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
+  testButton: {
+    flex: 1, height: 35, backgroundColor: '#007AFF', borderRadius: 5,
+    justifyContent: 'center', alignItems: 'center', marginHorizontal: 5,
   },
+  testButtonSecondary: { backgroundColor: '#999' },
+  testButtonText: { color: 'white', fontSize: 14, fontWeight: 'bold' },
+  quickSearchContainer: { borderTopWidth: 1, borderTopColor: '#eee', paddingTop: 10 },
+  quickSearchLabel: { fontSize: 12, color: '#666', marginBottom: 5 },
+  quickSearchButtons: { flexDirection: 'row', flexWrap: 'wrap' },
+  quickSearchButton: {
+    backgroundColor: '#f0f0f0', paddingHorizontal: 12, paddingVertical: 6,
+    borderRadius: 15, marginRight: 5, marginBottom: 5,
+  },
+  quickSearchText: { fontSize: 12, color: '#333' },
 });
 
 export default MapView;
