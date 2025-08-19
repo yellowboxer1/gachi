@@ -166,13 +166,13 @@ const MapView = ({
     const poi = poiList[i];
     const cityName = poi.upperAddrName || '';
     const locationInfo = cityName ? `${cityName}에 위치한 ` : '';
-    speak(`${locationInfo}${poi.name}을 검색하신 것 맞으실까요? 맞으면 화면을 한 번, 틀리면 두 번 눌러주세요.`);
+    speak(`${locationInfo}${poi.name}을 찾았습니다. 맞으면 화면을 한 번, 다른 결과를 원하시면 두 번 눌러주세요.`);
 
     if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
     const lockedName = poi.name;
     confirmTimeoutRef.current = setTimeout(() => {
       setIsConfirmMode(false);
-      speak('시간이 초과되어 자동으로 검색을 시작합니다.');
+      speak('시간이 초과되어 자동으로 경로를 탐색합니다.');
       handleSearchDestination(lockedName, true);
     }, CONFIRM_TIMEOUT);
   }, [recognizedPoiList, currentPoiIndex, resetNavigation, speak]);
@@ -293,24 +293,32 @@ const MapView = ({
 
   // ====== 확인 탭 처리 ======
   const handleConfirmTap = (tapCount) => {
-    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+    if (confirmTimeoutRef.current) { 
+      clearTimeout(confirmTimeoutRef.current); 
+      confirmTimeoutRef.current = null; 
+    }
 
     if (tapCount === 1) {
-      speak('검색을 시작합니다.');
+      // 싱글탭: 목적지 확정 및 경로 탐색
+      speak('경로를 탐색합니다.');
       const selectedPoi = recognizedPoiList[currentPoiIndex];
       if (selectedPoi) {
-        handleSearchDestination(selectedPoi.name, true);
+        const coordinates = validateAndFormatCoordinate(selectedPoi);
+        if (coordinates) {
+          handleSearchDestination(selectedPoi.name, true);
+        }
       }
       setIsConfirmMode(false);
       setIsGestureMode(false);
     } else if (tapCount === 2) {
+      // 더블탭: 다음 검색 결과 또는 취소
       if (currentPoiIndex + 1 < recognizedPoiList.length) {
         speak('다음 검색 결과를 확인합니다.');
         const nextIdx = currentPoiIndex + 1;
         setCurrentPoiIndex(nextIdx);
         presentPoi(recognizedPoiList, nextIdx);
       } else {
-        speak('더 이상 검색 결과가 없습니다. 다시 검색해 주세요.');
+        speak('검색을 취소합니다.');
         resetNavigation();
       }
     }
@@ -369,20 +377,17 @@ const MapView = ({
       onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
       onPanResponderGrant: () => {
+        // 롱프레스 타이머 시작
         longPressTimeoutRef.current = setTimeout(() => {
-          if (isConfirmMode) {
-            handleConfirmTap(1);
-            return;
-          }
-          if (!isGestureMode && !isNavigationMode) {
+          if (!isGestureMode && !isNavigationMode && !isConfirmMode) {
             setIsGestureMode(true);
-            setIsConfirmMode(false);
             speak('목적지 검색 모드로 전환합니다.');
             if (typeof startListening === 'function') startListening();
           }
         }, LONG_PRESS_DURATION);
       },
       onPanResponderMove: (_, g) => {
+        // 움직임 감지시 롱프레스 취소
         if (Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5) {
           if (longPressTimeoutRef.current) {
             clearTimeout(longPressTimeoutRef.current);
@@ -391,31 +396,47 @@ const MapView = ({
         }
       },
       onPanResponderRelease: (_, g) => {
+        // 롱프레스 타이머 정리
         if (longPressTimeoutRef.current) {
           clearTimeout(longPressTimeoutRef.current);
           longPressTimeoutRef.current = null;
         }
+        
+        // 탭 처리 (이동이 5픽셀 미만인 경우)
         if (Math.abs(g.dx) < 5 && Math.abs(g.dy) < 5) {
           const now = Date.now();
           const delta = now - lastTapTimeRef.current;
+          
+          // 더블탭 감지
           if (delta < DOUBLE_TAP_DELAY && lastTapTimeRef.current !== 0) {
+            // 이전 싱글탭 타이머 취소
             if (doubleTapTimeoutRef.current) {
               clearTimeout(doubleTapTimeoutRef.current);
               doubleTapTimeoutRef.current = null;
             }
+            
+            // 더블탭 처리
+            lastTapTimeRef.current = 0;
+            
             if (isConfirmMode) {
+              // 확인 모드에서 더블탭: 다음 검색 결과
               handleConfirmTap(2);
             } else if (isNavigationMode) {
+              // 내비게이션 모드에서 더블탭: 내비게이션 종료
               speak('내비게이션을 종료합니다.');
               if (typeof stopNavigation === 'function') stopNavigation();
               if (typeof setIsNavigationMode === 'function') setIsNavigationMode(false);
               resetNavigation();
             }
-            lastTapTimeRef.current = 0;
           } else {
+            // 싱글탭 (지연 처리)
             lastTapTimeRef.current = now;
             doubleTapTimeoutRef.current = setTimeout(() => {
-              if (isConfirmMode) handleConfirmTap(1);
+              // 싱글탭 처리
+              if (isConfirmMode) {
+                // 확인 모드에서 싱글탭: 목적지 확정
+                handleConfirmTap(1);
+              }
               lastTapTimeRef.current = 0;
             }, DOUBLE_TAP_DELAY);
           }
@@ -491,61 +512,31 @@ const MapView = ({
       return;
     }
 
-    // instructions 순서대로 모드 전환하며 각 모드의 path를 차례대로 소비
-    // 세부 segment id가 없기 때문에, 각 모드 배열을 포인터로 순차 소비하는 휴리스틱 적용
-    const walk = Array.isArray(safeWalkRoute) ? safeWalkRoute : [];
-    const bus = Array.isArray(safeBusRoute) ? safeBusRoute : [];
-    const subway = Array.isArray(safeSubwayRoute) ? safeSubwayRoute : [];
-
-    let wIdx = 0;
-    let bIdx = 0;
-    let sIdx = 0;
-
-    const concatChunk = (arr, idxRef, count = 999999) => {
-      const out = [];
-      let used = 0;
-      while (idxRef.value < arr.length && used < count) {
-        out.push(arr[idxRef.value]);
-        idxRef.value += 1;
-        used += 1;
-      }
-      return out;
-    };
-
-    const addUntilNextStop = (mode, positions) => {
-      // 기본은 남은 전부 소비. (세분화 정보 없으므로)
-      if (mode === 'walk') return positions.concat(concatChunk(walk, { value: wIdx }));
-      if (mode === 'bus') return positions.concat(concatChunk(bus, { value: bIdx }));
-      if (mode === 'subway') return positions.concat(concatChunk(subway, { value: sIdx }));
-      return positions;
-    };
-
-    let path = [];
-    let currentMode = null;
-
-    for (const step of safeInstructions) {
-      if (step.type === 'bus') {
-        if (currentMode !== 'bus') currentMode = 'bus';
-        path = addUntilNextStop('bus', path);
-      } else if (step.type === 'subway') {
-        if (currentMode !== 'subway') currentMode = 'subway';
-        path = addUntilNextStop('subway', path);
-      } else {
-        // start / direction / crosswalk / destination 등은 도보 모드로 취급
-        if (currentMode !== 'walk') currentMode = 'walk';
-        path = addUntilNextStop('walk', path);
-      }
+    // 대중교통 경로가 있을 때는 대중교통 경로만 표시
+    // (도보 경로는 대중교통 탑승 전후 구간이므로 제외)
+    let transitPath = [];
+    
+    if (safeBusRoute && safeBusRoute.length >= 2) {
+      transitPath = [...safeBusRoute];
+    } else if (safeSubwayRoute && safeSubwayRoute.length >= 2) {
+      transitPath = [...safeSubwayRoute];
     }
-
-    // 마지막 안전 처리: 아무 것도 못 붙였으면(데이터 편차 대비) 모든 모드 순차 연결
-    if (path.length < 2) {
-      path = [...walk, ...bus, ...subway];
-    }
-
+    
     // 중복 제거
-    path = dedupeSequentialCoords(path);
-    setUnifiedTransitPath(path);
-  }, [safeInstructions, safeWalkRoute, safeBusRoute, safeSubwayRoute, dedupeSequentialCoords]);
+    const uniquePath = [];
+    const coordSet = new Set();
+    
+    for (const coord of transitPath) {
+      if (!coord) continue;
+      const key = `${coord.latitude.toFixed(6)}_${coord.longitude.toFixed(6)}`;
+      if (!coordSet.has(key)) {
+        coordSet.add(key);
+        uniquePath.push(coord);
+      }
+    }
+    
+    setUnifiedTransitPath(uniquePath);
+  }, [safeBusRoute, safeSubwayRoute]);
 
   // ====== recognizedText → 공통 플로우 ======
   useEffect(() => {
@@ -613,9 +604,19 @@ const MapView = ({
 
   // ====== 어떤 경로를 그릴지 결정 ======
   const renderMode = useMemo(() => {
-    const hasTransit = (safeBusRoute.length >= 2) || (safeSubwayRoute.length >= 2);
-    if (hasTransit) return 'transit'; // 파란색 단일 경로
-    if (safeWalkRoute.length >= 2) return 'walk'; // 초록색
+    // 버스나 지하철 경로가 있으면 대중교통 모드
+    const hasBus = safeBusRoute && safeBusRoute.length >= 2;
+    const hasSubway = safeSubwayRoute && safeSubwayRoute.length >= 2;
+    
+    if (hasBus || hasSubway) {
+      return 'transit'; // 파란색 단일 경로
+    }
+    
+    // 도보 경로만 있으면 도보 모드
+    if (safeWalkRoute && safeWalkRoute.length >= 2) {
+      return 'walk'; // 초록색
+    }
+    
     return 'none';
   }, [safeWalkRoute, safeBusRoute, safeSubwayRoute]);
 
@@ -661,6 +662,7 @@ const MapView = ({
         {/* ====== 단일 경로만 그림 ====== */}
         {renderMode === 'walk' && safeWalkRoute.length >= 2 && (
           <NaverMapPathOverlay
+            key="walk-path"
             coords={safeWalkRoute}
             width={8}
             color={'green'}
@@ -671,6 +673,7 @@ const MapView = ({
 
         {renderMode === 'transit' && unifiedTransitPath.length >= 2 && (
           <NaverMapPathOverlay
+            key="transit-path"
             coords={unifiedTransitPath}
             width={8}
             color={'blue'}
@@ -759,7 +762,7 @@ const MapView = ({
       {isConfirmMode && recognizedDestination && (
         <View style={styles.confirmContainer}>
           <Text style={styles.confirmText}>"{recognizedDestination}"으로 안내할까요?</Text>
-          <Text style={styles.confirmSubtext}>확인: 한 번 탭 / 취소: 두 번 탭</Text>
+          <Text style={styles.confirmSubtext}>확인: 한 번 탭 / 다음/취소: 두 번 탭</Text>
         </View>
       )}
 
