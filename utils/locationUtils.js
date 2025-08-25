@@ -144,7 +144,7 @@ export const calculateBearing = (lat1, lon1, lat2, lon2) => {
     }
 };
 
-// 방향 각도를 쉬운 방향 표현으로 변환
+// 절대 방향 각도를 쉬운 방향 표현으로 변환 (동서남북)
 export const getDirectionFromBearing = (bearing) => {
     if (isNaN(bearing) || !isFinite(bearing)) {
         return '알 수 없음';
@@ -153,6 +153,221 @@ export const getDirectionFromBearing = (bearing) => {
     const directions = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
     const index = Math.round(bearing / 45) % 8;
     return directions[index];
+};
+
+// 현재 이동 방향 대비 상대적 방향 계산 (시각 장애인용 핵심 기능)
+export const getRelativeDirection = (currentBearing, targetBearing) => {
+    if (isNaN(currentBearing) || isNaN(targetBearing) || 
+        !isFinite(currentBearing) || !isFinite(targetBearing)) {
+        return { direction: '알 수 없음', angle: 0, description: '방향을 알 수 없습니다' };
+    }
+
+    // 각도 차이 계산 (-180 ~ 180도 범위로 정규화)
+    let angleDiff = targetBearing - currentBearing;
+    if (angleDiff > 180) angleDiff -= 360;
+    if (angleDiff < -180) angleDiff += 360;
+
+    const absAngle = Math.abs(angleDiff);
+    let direction = '';
+    let description = '';
+
+    if (absAngle <= 10) {
+        direction = '직진';
+        description = '계속 직진하세요';
+    } else if (absAngle <= 45) {
+        if (angleDiff > 0) {
+            direction = '약간 오른쪽';
+            description = '약간 오른쪽으로 방향을 조정하세요';
+        } else {
+            direction = '약간 왼쪽';
+            description = '약간 왼쪽으로 방향을 조정하세요';
+        }
+    } else if (absAngle <= 90) {
+        if (angleDiff > 0) {
+            direction = '오른쪽';
+            description = '오른쪽으로 돌아서 이동하세요';
+        } else {
+            direction = '왼쪽';
+            description = '왼쪽으로 돌아서 이동하세요';
+        }
+    } else if (absAngle <= 135) {
+        if (angleDiff > 0) {
+            direction = '뒤쪽 오른쪽';
+            description = '뒤쪽 오른쪽으로 크게 돌아서 이동하세요';
+        } else {
+            direction = '뒤쪽 왼쪽';
+            description = '뒤쪽 왼쪽으로 크게 돌아서 이동하세요';
+        }
+    } else {
+        direction = '뒤쪽';
+        description = '뒤쪽으로 돌아서 이동하세요';
+    }
+
+    return {
+        direction,
+        angle: Math.round(angleDiff),
+        absAngle: Math.round(absAngle),
+        description
+    };
+};
+
+// 사용자 이동 방향 계산 (최근 이동 경로 기반)
+export const calculateUserMovingDirection = (locationHistory) => {
+    if (!Array.isArray(locationHistory) || locationHistory.length < 2) {
+        return null;
+    }
+
+    // 최근 3개 위치를 사용하여 이동 방향 계산 (더 안정적)
+    const recentLocations = locationHistory.slice(-3);
+    const bearings = [];
+
+    for (let i = 0; i < recentLocations.length - 1; i++) {
+        const bearing = calculateBearing(
+            recentLocations[i].latitude,
+            recentLocations[i].longitude,
+            recentLocations[i + 1].latitude,
+            recentLocations[i + 1].longitude
+        );
+        if (!isNaN(bearing)) {
+            bearings.push(bearing);
+        }
+    }
+
+    if (bearings.length === 0) return null;
+
+    // 평균 방향 계산 (원형 평균)
+    let sinSum = 0;
+    let cosSum = 0;
+    
+    bearings.forEach(bearing => {
+        const radians = bearing * Math.PI / 180;
+        sinSum += Math.sin(radians);
+        cosSum += Math.cos(radians);
+    });
+
+    const avgRadians = Math.atan2(sinSum, cosSum);
+    const avgBearing = (avgRadians * 180 / Math.PI + 360) % 360;
+
+    return avgBearing;
+};
+
+// 상대적 방향 안내 생성 (시각 장애인용 메인 함수)
+export const generateRelativeDirectionGuidance = (currentPosition, targetPosition, locationHistory = []) => {
+    try {
+        if (!isValidLatLng(currentPosition) || !isValidLatLng(targetPosition)) {
+            return {
+                direction: '알 수 없음',
+                description: '위치 정보를 확인할 수 없습니다',
+                distance: 0
+            };
+        }
+
+        // 목표 지점까지의 거리 계산
+        const distance = calculateDistance(
+            currentPosition.latitude,
+            currentPosition.longitude,
+            targetPosition.latitude,
+            targetPosition.longitude
+        );
+
+        // 목표 지점의 절대 방향 계산
+        const targetBearing = calculateBearing(
+            currentPosition.latitude,
+            currentPosition.longitude,
+            targetPosition.latitude,
+            targetPosition.longitude
+        );
+
+        if (isNaN(targetBearing) || isNaN(distance)) {
+            return {
+                direction: '알 수 없음',
+                description: '방향을 계산할 수 없습니다',
+                distance: 0
+            };
+        }
+
+        // 사용자의 현재 이동 방향 계산
+        const userBearing = calculateUserMovingDirection(locationHistory);
+        
+        let relativeInfo;
+        if (userBearing !== null && !isNaN(userBearing)) {
+            // 이동 중인 경우 - 상대적 방향 제공
+            relativeInfo = getRelativeDirection(userBearing, targetBearing);
+        } else {
+            // 정지 상태이거나 이동 방향을 알 수 없는 경우 - 절대 방향 제공
+            const absoluteDirection = getDirectionFromBearing(targetBearing);
+            relativeInfo = {
+                direction: absoluteDirection,
+                description: `${absoluteDirection} 방향으로 이동하세요`,
+                angle: 0,
+                isAbsolute: true
+            };
+        }
+
+        // 거리에 따른 상세 안내
+        let distanceDescription = '';
+        if (distance < 5) {
+            distanceDescription = '바로 앞에 있습니다';
+        } else if (distance < 20) {
+            distanceDescription = `약 ${Math.round(distance)}미터 앞에 있습니다`;
+        } else if (distance < 100) {
+            distanceDescription = `약 ${Math.round(distance / 10) * 10}미터 이동하세요`;
+        } else {
+            distanceDescription = `약 ${Math.round(distance)}미터 이동하세요`;
+        }
+
+        return {
+            direction: relativeInfo.direction,
+            description: `${relativeInfo.description}. ${distanceDescription}`,
+            distance: Math.round(distance),
+            angle: relativeInfo.angle || 0,
+            absAngle: relativeInfo.absAngle || 0,
+            isAbsolute: relativeInfo.isAbsolute || false,
+            targetBearing: Math.round(targetBearing),
+            userBearing: userBearing ? Math.round(userBearing) : null
+        };
+    } catch (error) {
+        console.error('상대적 방향 안내 생성 중 오류:', error);
+        return {
+            direction: '알 수 없음',
+            description: '방향 안내를 생성할 수 없습니다',
+            distance: 0
+        };
+    }
+};
+
+// 턴 타입을 상대적 방향으로 변환
+export const getTurnInstruction = (turnType, distance = 0) => {
+    const distanceText = distance > 0 ? ` ${Math.round(distance)}미터` : '';
+    
+    switch (turnType) {
+        case 11: // 직진
+            return `직진으로${distanceText} 이동하세요`;
+        case 12: // 좌회전
+            return `왼쪽으로 돌아서${distanceText} 이동하세요`;
+        case 13: // 우회전
+            return `오른쪽으로 돌아서${distanceText} 이동하세요`;
+        case 14: // U턴
+            return `뒤쪽으로 돌아서${distanceText} 이동하세요`;
+        case 125: // 육교
+            return `앞에 육교가 있습니다. 육교를 이용하여${distanceText} 이동하세요`;
+        case 126: // 지하도
+            return `앞에 지하도가 있습니다. 지하도를 이용하여${distanceText} 이동하세요`;
+        case 127: // 계단
+            return `앞에 계단이 있습니다. 계단을 이용하여${distanceText} 이동하세요`;
+        case 128: // 경사로
+            return `앞에 경사로가 있습니다. 경사로를 이용하여${distanceText} 이동하세요`;
+        case 211:
+        case 212:
+        case 213: // 횡단보도
+            return `앞에 횡단보도가 있습니다. 횡단보도를 건너서${distanceText} 이동하세요`;
+        case 200: // 출발
+            return '출발지입니다';
+        case 201: // 도착
+            return '목적지에 도착했습니다';
+        default:
+            return distanceText ? `${distanceText} 이동하세요` : '계속 이동하세요';
+    }
 };
 
 // 네이버 지도 전용 좌표 포맷 변환 함수 (강화된 버전)

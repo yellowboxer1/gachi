@@ -15,7 +15,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import * as Speech from 'expo-speech';
-import { getPoiCoordinates } from '../../services/naverService'; // ✅ 검색은 네이버 API
+import { getPoiCoordinates } from '../../services/naverService';
 import { calculateDistance } from '../../utils/locationUtils';
 
 const MapView = ({
@@ -31,6 +31,13 @@ const MapView = ({
   isNavigationMode,
   setIsNavigationMode,
   recognizedText,
+  // 새로 추가된 실시간 정보
+  remainingDistance = 0,
+  estimatedTime = 0,
+  currentDirection = '',
+  isOffRoute = false,
+  // 경로 요약 정보 추가
+  routeSummary = null,
 }) => {
   // ====== State ======
   const [isGestureMode, setIsGestureMode] = useState(false);
@@ -280,17 +287,6 @@ const MapView = ({
     }
   }, [presentPoi, resetNavigation, safeUserLocation, speak, validateAndFormatCoordinate, waitForLocation]);
 
-  // ====== 음성 인식 결과 → 공통 플로우 ======
-  const handleSpeechResult = async (result) => {
-    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
-    if (!result || !result.trim()) {
-      speak('인식된 결과가 없습니다.');
-      resetNavigation();
-      return;
-    }
-    await startQueryFlow(result.trim());
-  };
-
   // ====== 확인 탭 처리 ======
   const handleConfirmTap = (tapCount) => {
     if (confirmTimeoutRef.current) { 
@@ -369,6 +365,25 @@ const MapView = ({
       setIsLoading(false);
     }
   };
+
+  // ====== 실시간 정보 포맷팅 ======
+  const formatDistance = useCallback((meters) => {
+    if (meters < 1000) {
+      return `${Math.round(meters)}m`;
+    } else {
+      return `${(meters / 1000).toFixed(1)}km`;
+    }
+  }, []);
+
+  const formatTime = useCallback((minutes) => {
+    if (minutes < 60) {
+      return `${Math.round(minutes)}분`;
+    } else {
+      const hours = Math.floor(minutes / 60);
+      const mins = Math.round(minutes % 60);
+      return `${hours}시간 ${mins}분`;
+    }
+  }, []);
 
   // ====== 하단 제스처 레이어 ======
   const panResponder = useRef(
@@ -709,6 +724,52 @@ const MapView = ({
         ))}
       </NaverMapView>
 
+      {/* 실시간 안내 정보 패널 */}
+      {isNavigationMode && (
+        <View style={[styles.navigationInfo, isOffRoute && styles.navigationInfoOffRoute]}>
+          {/* 핵심 정보만 표시 */}
+          <View style={styles.navigationInfoRow}>
+            <Text style={styles.navigationInfoLabel}>남은 거리:</Text>
+            <Text style={styles.navigationInfoValue}>{formatDistance(remainingDistance)}</Text>
+          </View>
+          <View style={styles.navigationInfoRow}>
+            <Text style={styles.navigationInfoLabel}>예상 시간:</Text>
+            <Text style={styles.navigationInfoValue}>{formatTime(estimatedTime)}</Text>
+          </View>
+          {currentDirection && (
+            <View style={styles.navigationInfoRow}>
+              <Text style={styles.navigationInfoLabel}>방향:</Text>
+              <Text style={styles.navigationInfoValue}>
+                {currentDirection === '직진' ? '🔸 직진' : 
+                 currentDirection === '왼쪽' ? '⬅️ 왼쪽' :
+                 currentDirection === '오른쪽' ? '➡️ 오른쪽' :
+                 currentDirection === '약간 왼쪽' ? '↖️ 약간 왼쪽' :
+                 currentDirection === '약간 오른쪽' ? '↗️ 약간 오른쪽' :
+                 currentDirection === '뒤쪽' ? '🔄 뒤쪽' :
+                 currentDirection}
+              </Text>
+            </View>
+          )}
+          
+          {/* 경로 이탈 경고 */}
+          {isOffRoute && (
+            <View style={styles.offRouteWarning}>
+              <Text style={styles.offRouteText}>⚠️ 경로 이탈</Text>
+            </View>
+          )}
+          
+          {/* 다음 안내 미리보기 (간소화) */}
+          {instructions.length > 0 && (
+            <View style={styles.nextInstructionContainer}>
+              <Text style={styles.nextInstructionLabel}>다음:</Text>
+              <Text style={styles.nextInstructionText} numberOfLines={2}>
+                {instructions[0]?.description || '안내 정보 없음'}
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
       {/* 하단 제스처 레이어 */}
       <View
         style={[
@@ -772,6 +833,23 @@ const MapView = ({
         onPress={() => setTestInputVisible(!testInputVisible)}
       >
         <Text style={styles.testToggleText}>TEST</Text>
+      </TouchableOpacity>
+
+      {/* 음성 테스트 버튼 추가 */}
+      <TouchableOpacity
+        style={styles.speechTestButton}
+        onPress={() => {
+          console.log('🔊 음성 테스트 버튼 클릭');
+          Speech.speak('음성 테스트입니다. 소리가 들리나요?', {
+            language: 'ko-KR',
+            rate: 0.9,
+            onStart: () => console.log('🎤 테스트 음성 시작'),
+            onDone: () => console.log('🎤 테스트 음성 완료'),
+            onError: (error) => console.error('🎤 테스트 음성 오류:', error)
+          });
+        }}
+      >
+        <Text style={styles.testToggleText}>🔊</Text>
       </TouchableOpacity>
 
       {testInputVisible && (
@@ -854,6 +932,73 @@ const styles = StyleSheet.create({
   },
   modeText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
 
+  // 실시간 안내 정보 패널 스타일
+  navigationInfo: {
+    position: 'absolute',
+    top: 70,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0, 176, 80, 0.95)',
+    borderRadius: 10,
+    padding: 15,
+    zIndex: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    maxHeight: 160, // 높이 제한으로 간소화
+  },
+  navigationInfoOffRoute: {
+    backgroundColor: 'rgba(255, 87, 34, 0.95)',
+  },
+  navigationInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  navigationInfoLabel: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  navigationInfoValue: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  nextInstructionContainer: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  nextInstructionLabel: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  nextInstructionText: {
+    color: 'white',
+    fontSize: 12,
+    opacity: 0.9,
+    lineHeight: 16,
+  },
+  offRouteWarning: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.3)',
+    alignItems: 'center',
+  },
+  offRouteText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+
   gestureOverlay: { position: 'absolute', left: 0, right: 0, zIndex: 50, elevation: 50 },
 
   confirmContainer: {
@@ -869,6 +1014,12 @@ const styles = StyleSheet.create({
   testToggleButton: {
     position: 'absolute', bottom: 100, right: 20,
     width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 0, 0, 0.8)',
+    justifyContent: 'center', alignItems: 'center', zIndex: 100, elevation: 100,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
+  },
+  speechTestButton: {
+    position: 'absolute', bottom: 100, right: 80,
+    width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(0, 150, 255, 0.8)',
     justifyContent: 'center', alignItems: 'center', zIndex: 100, elevation: 100,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
   },
