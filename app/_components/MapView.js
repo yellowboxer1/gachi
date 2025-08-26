@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import * as Speech from 'expo-speech';
+import ObstacleDetection from './ObstacleDetection';
 import { getPoiCoordinates } from '../../services/naverService';
 import { calculateDistance } from '../../utils/locationUtils';
 
@@ -685,7 +686,13 @@ const MapView = ({
             outlineColor={'white'}
           />
         )}
-
+        {/* 장애물 감지 컴포넌트 추가 - 내비게이션 모드일 때만 */}
+        {isNavigationMode && (
+            <ObstacleDetection 
+                isNavigating={isNavigationMode}
+                userLocation={safeUserLocation}
+            />
+        )}
         {renderMode === 'transit' && unifiedTransitPath.length >= 2 && (
           <NaverMapPathOverlay
             key="transit-path"

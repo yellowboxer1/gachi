@@ -5,6 +5,7 @@ import * as Speech from 'expo-speech';
 import MapView from './_components/MapView';
 import useSpeechRecognition from './_hooks/useSpeechRecognition';
 import { getPoiCoordinates, getCombinedDirections } from '../services/tmapService';
+import ObstacleDetection from './_components/ObstacleDetection';
 import { 
     calculateDistance, 
     generateRelativeDirectionGuidance, 
@@ -205,7 +206,7 @@ export default function MainScreen() {
         if (isCurrentlyOffRoute !== isOffRoute) {
             setIsOffRoute(isCurrentlyOffRoute);
             if (isCurrentlyOffRoute) {
-                addToSpeechQueue('경로에서 벗어났습니다! 경로로 돌아가세요.', 'urgent');
+                addToSpeechQueue('경로를 이탈하였습니다!', 'urgent');
                 
                 // 경로 복귀 안내
                 setTimeout(() => {
@@ -391,7 +392,7 @@ export default function MainScreen() {
                 if (directionInfo.direction === '직진') {
                     continuousMessage = '계속 직진 중입니다.';
                 } else if (directionInfo.distance < 50) {
-                    continuousMessage = `곧 ${directionInfo.direction}로 이동해야 합니다.`;
+                    continuousMessage = `잠시후 ${directionInfo.direction}방향 입니다.`;
                 } else {
                     continuousMessage = `${directionInfo.direction} 방향으로 이동 중입니다.`;
                 }
@@ -790,9 +791,15 @@ export default function MainScreen() {
                     testSpeech={testSpeech}
                 />
             )}
-        </View>
-    );
-}
+                {isNavigationMode && (
+                    <ObstacleDetection 
+                        isNavigating={isNavigating}
+                        userLocation={userLocation}
+                    />
+                )}
+            </View>
+        );
+    }
 
 const styles = StyleSheet.create({
     container: {
