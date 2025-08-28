@@ -13,6 +13,8 @@ import {
   ActivityIndicator,
   TextInput,
   TouchableOpacity,
+  Pressable,
+  Animated,
 } from 'react-native';
 import * as Speech from 'expo-speech';
 import ObstacleDetection from './ObstacleDetection';
@@ -32,12 +34,10 @@ const MapView = ({
   isNavigationMode,
   setIsNavigationMode,
   recognizedText,
-  // 새로 추가된 실시간 정보
   remainingDistance = 0,
   estimatedTime = 0,
   currentDirection = '',
   isOffRoute = false,
-  // 경로 요약 정보 추가
   routeSummary = null,
 }) => {
   // ====== State ======
@@ -61,8 +61,9 @@ const MapView = ({
   const [safeUserLocation, setSafeUserLocation] = useState(null);
   const [safeInstructions, setSafeInstructions] = useState([]);
 
-  // unified path (대중교통 경로일 때 instructions를 따라 하나로 이어붙인 라인)
   const [unifiedTransitPath, setUnifiedTransitPath] = useState([]);
+  const [showDetectDebug, setShowDetectDebug] = useState(false);
+
 
   // ====== Refs ======
   const mapRef = useRef(null);
@@ -74,13 +75,39 @@ const MapView = ({
   const followCamTimer = useRef(null);
   const navInFlightRef = useRef(false);
 
-  // ====== Const ======
-  const LONG_PRESS_DURATION = 800;
-  const DOUBLE_TAP_DELAY = 380;
-  const CONFIRM_TIMEOUT = 10000;
-  const screenHeight = Dimensions.get('window').height;
-  const halfScreenHeight = screenHeight / 2;
-  const DEFAULT_LOCATION = { latitude: 35.1796, longitude: 129.0756 };
+  // ====== Layout animation (일반 ↔ 내비) ======
+  const topFlex = useRef(new Animated.Value(isNavigationMode ? 0.5 : 1)).current;
+  const bottomFlex = useRef(new Animated.Value(isNavigationMode ? 0.5 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(topFlex, {
+      toValue: isNavigationMode ? 0.5 : 1,
+      duration: 260,
+      useNativeDriver: false,
+    }).start();
+    Animated.timing(bottomFlex, {
+      toValue: isNavigationMode ? 0.5 : 0,
+      duration: 260,
+      useNativeDriver: false,
+    }).start();
+  }, [isNavigationMode, topFlex, bottomFlex]);
+
+  // ====== Gesture (카메라/오버레이 공용) ======
+  const lastTapRef = useRef(0);
+  const handleDoubleTapOrSingle = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTapRef.current < 350) {
+      Speech.speak('경로 안내를 취소합니다.', { language: 'ko-KR' });
+      stopNavigation?.();
+      setIsNavigationMode?.(false);
+    }
+    lastTapRef.current = now;
+  }, [setIsNavigationMode, stopNavigation]);
+
+  const handleLongPress = useCallback(() => {
+    Speech.speak('음성 검색을 시작합니다. 목적지를 말해주세요.', { language: 'ko-KR' });
+    startListening?.();
+  }, [startListening]);
 
   // ====== Speech util ======
   const speak = useCallback(async (text) => {
@@ -182,10 +209,10 @@ const MapView = ({
       setIsConfirmMode(false);
       speak('시간이 초과되어 자동으로 경로를 탐색합니다.');
       handleSearchDestination(lockedName, true);
-    }, CONFIRM_TIMEOUT);
+    }, 10000);
   }, [recognizedPoiList, currentPoiIndex, resetNavigation, speak]);
 
-  // ====== 음성/텍스트 공통 검색 시작 (네이버 검색) ======
+  // ====== 검색 플로우 ======
   const startQueryFlow = useCallback(async (query) => {
     await waitForLocation();
 
@@ -219,7 +246,6 @@ const MapView = ({
         }
       }
 
-      // 스코어링 정렬
       const norm = (s) => (s || '').toString().trim().toLowerCase().replace(/\s+/g, '');
       const hasSuffix = (q, kw) => new RegExp(`${kw}$`).test(q);
       const landmarkSuffixes = ['역','공원','대학교','병원','구청','시청','터미널','공항','해수욕장','시장','백화점'];
@@ -296,7 +322,6 @@ const MapView = ({
     }
 
     if (tapCount === 1) {
-      // 싱글탭: 목적지 확정 및 경로 탐색
       speak('경로를 탐색합니다.');
       const selectedPoi = recognizedPoiList[currentPoiIndex];
       if (selectedPoi) {
@@ -308,7 +333,6 @@ const MapView = ({
       setIsConfirmMode(false);
       setIsGestureMode(false);
     } else if (tapCount === 2) {
-      // 더블탭: 다음 검색 결과 또는 취소
       if (currentPoiIndex + 1 < recognizedPoiList.length) {
         speak('다음 검색 결과를 확인합니다.');
         const nextIdx = currentPoiIndex + 1;
@@ -369,41 +393,33 @@ const MapView = ({
 
   // ====== 실시간 정보 포맷팅 ======
   const formatDistance = useCallback((meters) => {
-    if (meters < 1000) {
-      return `${Math.round(meters)}m`;
-    } else {
-      return `${(meters / 1000).toFixed(1)}km`;
-    }
+    if (meters < 1000) return `${Math.round(meters)}m`;
+    return `${(meters / 1000).toFixed(1)}km`;
   }, []);
 
   const formatTime = useCallback((minutes) => {
-    if (minutes < 60) {
-      return `${Math.round(minutes)}분`;
-    } else {
-      const hours = Math.floor(minutes / 60);
-      const mins = Math.round(minutes % 60);
-      return `${hours}시간 ${mins}분`;
-    }
+    if (minutes < 60) return `${Math.round(minutes)}분`;
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.round(minutes % 60);
+    return `${hours}시간 ${mins}분`;
   }, []);
 
-  // ====== 하단 제스처 레이어 ======
+  // ====== 제스처(상단 50%만 적용) ======
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5,
       onPanResponderGrant: () => {
-        // 롱프레스 타이머 시작
         longPressTimeoutRef.current = setTimeout(() => {
           if (!isGestureMode && !isNavigationMode && !isConfirmMode) {
             setIsGestureMode(true);
             speak('목적지 검색 모드로 전환합니다.');
             if (typeof startListening === 'function') startListening();
           }
-        }, LONG_PRESS_DURATION);
+        }, 800);
       },
       onPanResponderMove: (_, g) => {
-        // 움직임 감지시 롱프레스 취소
         if (Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5) {
           if (longPressTimeoutRef.current) {
             clearTimeout(longPressTimeoutRef.current);
@@ -411,51 +427,10 @@ const MapView = ({
           }
         }
       },
-      onPanResponderRelease: (_, g) => {
-        // 롱프레스 타이머 정리
+      onPanResponderRelease: () => {
         if (longPressTimeoutRef.current) {
           clearTimeout(longPressTimeoutRef.current);
           longPressTimeoutRef.current = null;
-        }
-        
-        // 탭 처리 (이동이 5픽셀 미만인 경우)
-        if (Math.abs(g.dx) < 5 && Math.abs(g.dy) < 5) {
-          const now = Date.now();
-          const delta = now - lastTapTimeRef.current;
-          
-          // 더블탭 감지
-          if (delta < DOUBLE_TAP_DELAY && lastTapTimeRef.current !== 0) {
-            // 이전 싱글탭 타이머 취소
-            if (doubleTapTimeoutRef.current) {
-              clearTimeout(doubleTapTimeoutRef.current);
-              doubleTapTimeoutRef.current = null;
-            }
-            
-            // 더블탭 처리
-            lastTapTimeRef.current = 0;
-            
-            if (isConfirmMode) {
-              // 확인 모드에서 더블탭: 다음 검색 결과
-              handleConfirmTap(2);
-            } else if (isNavigationMode) {
-              // 내비게이션 모드에서 더블탭: 내비게이션 종료
-              speak('내비게이션을 종료합니다.');
-              if (typeof stopNavigation === 'function') stopNavigation();
-              if (typeof setIsNavigationMode === 'function') setIsNavigationMode(false);
-              resetNavigation();
-            }
-          } else {
-            // 싱글탭 (지연 처리)
-            lastTapTimeRef.current = now;
-            doubleTapTimeoutRef.current = setTimeout(() => {
-              // 싱글탭 처리
-              if (isConfirmMode) {
-                // 확인 모드에서 싱글탭: 목적지 확정
-                handleConfirmTap(1);
-              }
-              lastTapTimeRef.current = 0;
-            }, DOUBLE_TAP_DELAY);
-          }
         }
       },
       onPanResponderTerminationRequest: () => true,
@@ -471,7 +446,7 @@ const MapView = ({
   // ====== User Location ======
   useEffect(() => {
     const formatted = validateAndFormatCoordinate(userLocation);
-    setSafeUserLocation(formatted || DEFAULT_LOCATION);
+    setSafeUserLocation(formatted || { latitude: 35.1796, longitude: 129.0756 });
   }, [userLocation, validateAndFormatCoordinate]);
 
   // ====== Route & Destination ======
@@ -516,9 +491,8 @@ const MapView = ({
     setSafeInstructions(out);
   }, [instructions, validateAndFormatCoordinate]);
 
-  // ====== unified path 만들기 (대중교통 경로인 경우) ======
+  // ====== unified path ======
   useEffect(() => {
-    // 대중교통이면 route.bus 또는 route.subway에 좌표가 존재
     const isTransit =
       (safeBusRoute && safeBusRoute.length >= 2) ||
       (safeSubwayRoute && safeSubwayRoute.length >= 2);
@@ -528,20 +502,12 @@ const MapView = ({
       return;
     }
 
-    // 대중교통 경로가 있을 때는 대중교통 경로만 표시
-    // (도보 경로는 대중교통 탑승 전후 구간이므로 제외)
     let transitPath = [];
-    
-    if (safeBusRoute && safeBusRoute.length >= 2) {
-      transitPath = [...safeBusRoute];
-    } else if (safeSubwayRoute && safeSubwayRoute.length >= 2) {
-      transitPath = [...safeSubwayRoute];
-    }
-    
-    // 중복 제거
+    if (safeBusRoute && safeBusRoute.length >= 2) transitPath = [...safeBusRoute];
+    else if (safeSubwayRoute && safeSubwayRoute.length >= 2) transitPath = [...safeSubwayRoute];
+
     const uniquePath = [];
     const coordSet = new Set();
-    
     for (const coord of transitPath) {
       if (!coord) continue;
       const key = `${coord.latitude.toFixed(6)}_${coord.longitude.toFixed(6)}`;
@@ -550,7 +516,6 @@ const MapView = ({
         uniquePath.push(coord);
       }
     }
-    
     setUnifiedTransitPath(uniquePath);
   }, [safeBusRoute, safeSubwayRoute]);
 
@@ -594,7 +559,7 @@ const MapView = ({
     }, 450);
   }, [safeUserLocation, isNavigationMode]);
 
-  // ====== Fit-once after route received ======
+  // ====== Fit-once ======
   useEffect(() => {
     const all = unifiedTransitPath.length >= 2
       ? unifiedTransitPath
@@ -618,21 +583,12 @@ const MapView = ({
     } catch {}
   }, [safeWalkRoute, safeSubwayRoute, safeBusRoute, unifiedTransitPath]);
 
-  // ====== 어떤 경로를 그릴지 결정 ======
+  // ====== 어떤 경로를 그릴지 ======
   const renderMode = useMemo(() => {
-    // 버스나 지하철 경로가 있으면 대중교통 모드
     const hasBus = safeBusRoute && safeBusRoute.length >= 2;
     const hasSubway = safeSubwayRoute && safeSubwayRoute.length >= 2;
-    
-    if (hasBus || hasSubway) {
-      return 'transit'; // 파란색 단일 경로
-    }
-    
-    // 도보 경로만 있으면 도보 모드
-    if (safeWalkRoute && safeWalkRoute.length >= 2) {
-      return 'walk'; // 초록색
-    }
-    
+    if (hasBus || hasSubway) return 'transit';
+    if (safeWalkRoute && safeWalkRoute.length >= 2) return 'walk';
     return 'none';
   }, [safeWalkRoute, safeBusRoute, safeSubwayRoute]);
 
@@ -655,178 +611,191 @@ const MapView = ({
   }
 
   return (
-    <View style={styles.mapContainer}>
-      <NaverMapView
-        ref={mapRef}
-        style={styles.map}
-        initialCamera={{
-          latitude: safeUserLocation.latitude,
-          longitude: safeUserLocation.longitude,
-          zoom: 16.5,
-          tilt: 0,
-          bearing: 0,
-        }}
-        mapType="Basic"
-        isShowLocationButton={true}
-        isShowCompass={true}
-        isShowScaleBar={false}
-        isShowZoomControls={false}
-        isShowIndoorLevelPicker={false}
-        locationButtonStyle={{ position: 'absolute', bottom: 20, right: 20 }}
-        onError={() => setMapError({ message: '지도 로딩 중 오류가 발생했습니다.' })}
-      >
-        {/* ====== 단일 경로만 그림 ====== */}
-        {renderMode === 'walk' && safeWalkRoute.length >= 2 && (
-          <NaverMapPathOverlay
-            key="walk-path"
-            coords={safeWalkRoute}
-            width={8}
-            color={'green'}
-            outlineWidth={2}
-            outlineColor={'white'}
+    <View style={styles.root}>
+      {/* 상단: 지도 (애니메이션) */}
+      <Animated.View style={[styles.topMapArea, { flex: topFlex }]} {...panResponder.panHandlers}>
+        <NaverMapView
+          ref={mapRef}
+          style={styles.map}
+          initialCamera={{
+            latitude: safeUserLocation.latitude,
+            longitude: safeUserLocation.longitude,
+            zoom: 16.5,
+            tilt: 0,
+            bearing: 0,
+          }}
+          mapType="Basic"
+          useTextureView={true}        // ✅ 중요: 지도 Surface → TextureView
+          isShowLocationButton={true}
+          isShowCompass={true}
+          isShowScaleBar={false}
+          isShowZoomControls={false}
+          isShowIndoorLevelPicker={false}
+          locationButtonStyle={{ position: 'absolute', bottom: 20, right: 20 }}
+          onError={() => setMapError({ message: '지도 로딩 중 오류가 발생했습니다.' })}
+        >
+          {renderMode === 'walk' && safeWalkRoute.length >= 2 && (
+            <NaverMapPathOverlay
+              key="walk-path"
+              coords={safeWalkRoute}
+              width={8}
+              color={'green'}
+              outlineWidth={2}
+              outlineColor={'white'}
+            />
+          )}
+          {renderMode === 'transit' && unifiedTransitPath.length >= 2 && (
+            <NaverMapPathOverlay
+              key="transit-path"
+              coords={unifiedTransitPath}
+              width={8}
+              color={'blue'}
+              outlineWidth={2}
+              outlineColor={'white'}
+            />
+          )}
+          {safeDestination && (
+            <NaverMapMarkerOverlay
+              latitude={safeDestination.latitude}
+              longitude={safeDestination.longitude}
+              width={30}
+              height={30}
+              anchor={{ x: 0.5, y: 1 }}
+              caption={{ text: '목적지' }}
+              onTap={() => speak('목적지입니다.')}
+            />
+          )}
+          {safeInstructions.map((instruction, idx) => (
+            <NaverMapMarkerOverlay
+              key={`ins-${instruction.position.latitude}-${instruction.position.longitude}-${idx}`}
+              latitude={instruction.position.latitude}
+              longitude={instruction.position.longitude}
+              width={24}
+              height={24}
+              anchor={{ x: 0.5, y: 0.5 }}
+              onTap={() => speak(instruction.description || '안내 정보가 없습니다')}
+            />
+          ))}
+        </NaverMapView>
+
+        {/* 지도 위 정보 패널 */}
+        {isNavigationMode && (
+          <View style={[styles.navigationInfo, isOffRoute && styles.navigationInfoOffRoute]}>
+            <View style={styles.navigationInfoRow}>
+              <Text style={styles.navigationInfoLabel}>남은 거리:</Text>
+              <Text style={styles.navigationInfoValue}>{formatDistance(remainingDistance)}</Text>
+            </View>
+            <View style={styles.navigationInfoRow}>
+              <Text style={styles.navigationInfoLabel}>예상 시간:</Text>
+              <Text style={styles.navigationInfoValue}>{formatTime(estimatedTime)}</Text>
+            </View>
+            {currentDirection && (
+              <View style={styles.navigationInfoRow}>
+                <Text style={styles.navigationInfoLabel}>방향:</Text>
+                <Text style={styles.navigationInfoValue}>
+                  {currentDirection === '직진' ? '🔸 직진' : 
+                   currentDirection === '왼쪽' ? '⬅️ 왼쪽' :
+                   currentDirection === '오른쪽' ? '➡️ 오른쪽' :
+                   currentDirection === '약간 왼쪽' ? '↖️ 약간 왼쪽' :
+                   currentDirection === '약간 오른쪽' ? '↗️ 약간 오른쪽' :
+                   currentDirection === '뒤쪽' ? '🔄 뒤쪽' :
+                   currentDirection}
+                </Text>
+              </View>
+            )}
+            {isOffRoute && (
+              <View style={styles.offRouteWarning}>
+                <Text style={styles.offRouteText}>⚠️ 경로 이탈</Text>
+              </View>
+            )}
+            {instructions.length > 0 && (
+              <View style={styles.nextInstructionContainer}>
+                <Text style={styles.nextInstructionLabel}>다음:</Text>
+                <Text style={styles.nextInstructionText} numberOfLines={2}>
+                  {instructions[0]?.description || '안내 정보 없음'}
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* 모드 표시 배지 */}
+        <View
+          style={[
+            styles.modeIndicator,
+            {
+              backgroundColor: isConfirmMode
+                ? 'rgba(255, 153, 0, 0.9)'
+                : isGestureMode
+                ? 'rgba(0, 120, 255, 0.9)'
+                : isNavigationMode
+                ? 'rgba(0, 176, 80, 0.9)'
+                : 'rgba(0, 0, 0, 0.7)',
+            },
+          ]}
+        >
+          <Text style={styles.modeText}>
+            {isConfirmMode
+              ? '확인 모드'
+              : isGestureMode
+              ? '음성 검색 모드'
+              : isNavigationMode
+              ? '경로 안내 모드'
+              : '일반 모드'}
+          </Text>
+        </View>
+
+        {/* 일반 모드: 지도 하단 45% 터치 오버레이(더블탭/롱프레스) */}
+        {!isNavigationMode && (
+          <Pressable
+            style={styles.bottomTouchOverlay}
+            onPress={handleDoubleTapOrSingle}
+            onLongPress={handleLongPress}
+            delayLongPress={700}
           />
         )}
-        {/* 장애물 감지 컴포넌트 추가 - 내비게이션 모드일 때만 */}
-        {isNavigationMode && (
-            <ObstacleDetection 
+      </Animated.View>
+
+      {/* 하단: 카메라/탐지 (내비 모드일 때만 표시) */}
+            <Animated.View style={[
+              styles.bottomCameraArea,
+              { flex: bottomFlex, height: isNavigationMode ? undefined : 0 }
+            ]}>
+              <ObstacleDetection
                 isNavigating={isNavigationMode}
                 userLocation={safeUserLocation}
-            />
-        )}
-        {renderMode === 'transit' && unifiedTransitPath.length >= 2 && (
-          <NaverMapPathOverlay
-            key="transit-path"
-            coords={unifiedTransitPath}
-            width={8}
-            color={'blue'}
-            outlineWidth={2}
-            outlineColor={'white'}
-          />
-        )}
+                minimal={!showDetectDebug}
+                autoStart
+              />
+              {isNavigationMode && (
+                <Pressable
+                  style={StyleSheet.absoluteFill}
+                  onPress={handleDoubleTapOrSingle}
+                  onLongPress={handleLongPress}
+                  delayLongPress={700}
+                />
+              )}
+            </Animated.View>
 
-        {/* 목적지 */}
-        {safeDestination && (
-          <NaverMapMarkerOverlay
-            latitude={safeDestination.latitude}
-            longitude={safeDestination.longitude}
-            width={30}
-            height={30}
-            anchor={{ x: 0.5, y: 1 }}
-            caption={{ text: '목적지' }}
-            onTap={() => speak('목적지입니다.')}
-          />
-        )}
-
-        {/* 안내 포인트 (중복 제거됨) */}
-        {safeInstructions.map((instruction, idx) => (
-          <NaverMapMarkerOverlay
-            key={`ins-${instruction.position.latitude}-${instruction.position.longitude}-${idx}`}
-            latitude={instruction.position.latitude}
-            longitude={instruction.position.longitude}
-            width={24}
-            height={24}
-            anchor={{ x: 0.5, y: 0.5 }}
-            onTap={() => speak(instruction.description || '안내 정보가 없습니다')}
-          />
-        ))}
-      </NaverMapView>
-
-      {/* 실시간 안내 정보 패널 */}
-      {isNavigationMode && (
-        <View style={[styles.navigationInfo, isOffRoute && styles.navigationInfoOffRoute]}>
-          {/* 핵심 정보만 표시 */}
-          <View style={styles.navigationInfoRow}>
-            <Text style={styles.navigationInfoLabel}>남은 거리:</Text>
-            <Text style={styles.navigationInfoValue}>{formatDistance(remainingDistance)}</Text>
-          </View>
-          <View style={styles.navigationInfoRow}>
-            <Text style={styles.navigationInfoLabel}>예상 시간:</Text>
-            <Text style={styles.navigationInfoValue}>{formatTime(estimatedTime)}</Text>
-          </View>
-          {currentDirection && (
-            <View style={styles.navigationInfoRow}>
-              <Text style={styles.navigationInfoLabel}>방향:</Text>
-              <Text style={styles.navigationInfoValue}>
-                {currentDirection === '직진' ? '🔸 직진' : 
-                 currentDirection === '왼쪽' ? '⬅️ 왼쪽' :
-                 currentDirection === '오른쪽' ? '➡️ 오른쪽' :
-                 currentDirection === '약간 왼쪽' ? '↖️ 약간 왼쪽' :
-                 currentDirection === '약간 오른쪽' ? '↗️ 약간 오른쪽' :
-                 currentDirection === '뒤쪽' ? '🔄 뒤쪽' :
-                 currentDirection}
-              </Text>
-            </View>
-          )}
-          
-          {/* 경로 이탈 경고 */}
-          {isOffRoute && (
-            <View style={styles.offRouteWarning}>
-              <Text style={styles.offRouteText}>⚠️ 경로 이탈</Text>
-            </View>
-          )}
-          
-          {/* 다음 안내 미리보기 (간소화) */}
-          {instructions.length > 0 && (
-            <View style={styles.nextInstructionContainer}>
-              <Text style={styles.nextInstructionLabel}>다음:</Text>
-              <Text style={styles.nextInstructionText} numberOfLines={2}>
-                {instructions[0]?.description || '안내 정보 없음'}
-              </Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* 하단 제스처 레이어 */}
-      <View
-        style={[
-          styles.gestureOverlay,
-          {
-            top: halfScreenHeight,
-            height: halfScreenHeight,
-            backgroundColor: isGestureMode ? 'rgba(0, 0, 0, 0.04)' : 'transparent',
-          },
-        ]}
-        pointerEvents={testInputVisible || isConfirmMode ? 'none' : 'auto'}
-        collapsable={false}
-        {...panResponder.panHandlers}
-      />
-
-      {/* Loading */}
-      {isLoading && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#0000ff" />
-          <Text style={styles.loadingText}>검색 중입니다...</Text>
-        </View>
-      )}
-
-      {/* Mode pill */}
-      <View
-        style={[
-          styles.modeIndicator,
-          {
-            backgroundColor: isConfirmMode
-              ? 'rgba(255, 153, 0, 0.9)'
-              : isGestureMode
-              ? 'rgba(0, 120, 255, 0.9)'
-              : isNavigationMode
-              ? 'rgba(0, 176, 80, 0.9)'
-              : 'rgba(0, 0, 0, 0.7)',
-          },
-        ]}
+      {/* ===== 아래는 테스트/확인/로딩 UI ===== */}
+      <TouchableOpacity
+        style={styles.testToggleButton}
+        onPress={() => setTestInputVisible(!testInputVisible)}
       >
-        <Text style={styles.modeText}>
-          {isConfirmMode
-            ? '확인 모드'
-            : isGestureMode
-            ? '음성 검색 모드'
-            : isNavigationMode
-            ? '경로 안내 모드'
-            : '일반 모드'}
-        </Text>
-      </View>
+        <Text style={styles.testToggleText}>TEST</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.speechTestButton}
+        onPress={() => {
+          Speech.speak('음성 테스트입니다. 소리가 들리나요?', {
+            language: 'ko-KR',
+            rate: 0.9,
+          });
+        }}
+      >
+        <Text style={styles.testToggleText}>🔊</Text>
+      </TouchableOpacity>
 
-      {/* Confirm banner */}
       {isConfirmMode && recognizedDestination && (
         <View style={styles.confirmContainer}>
           <Text style={styles.confirmText}>"{recognizedDestination}"으로 안내할까요?</Text>
@@ -834,30 +803,12 @@ const MapView = ({
         </View>
       )}
 
-      {/* ==== Test UI ==== */}
-      <TouchableOpacity
-        style={styles.testToggleButton}
-        onPress={() => setTestInputVisible(!testInputVisible)}
-      >
-        <Text style={styles.testToggleText}>TEST</Text>
-      </TouchableOpacity>
-
-      {/* 음성 테스트 버튼 추가 */}
-      <TouchableOpacity
-        style={styles.speechTestButton}
-        onPress={() => {
-          console.log('🔊 음성 테스트 버튼 클릭');
-          Speech.speak('음성 테스트입니다. 소리가 들리나요?', {
-            language: 'ko-KR',
-            rate: 0.9,
-            onStart: () => console.log('🎤 테스트 음성 시작'),
-            onDone: () => console.log('🎤 테스트 음성 완료'),
-            onError: (error) => console.error('🎤 테스트 음성 오류:', error)
-          });
-        }}
-      >
-        <Text style={styles.testToggleText}>🔊</Text>
-      </TouchableOpacity>
+      {isLoading && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color="#0000ff" />
+          <Text style={styles.loadingText}>검색 중입니다...</Text>
+        </View>
+      )}
 
       {testInputVisible && (
         <View style={styles.testInputContainer}>
@@ -893,25 +844,6 @@ const MapView = ({
               <Text style={styles.testButtonText}>취소</Text>
             </TouchableOpacity>
           </View>
-
-          <View style={styles.quickSearchContainer}>
-            <Text style={styles.quickSearchLabel}>빠른 검색:</Text>
-            <View style={styles.quickSearchButtons}>
-              {['부산역', '해운대해수욕장', '센텀시티', '광안리해수욕장'].map((q) => (
-                <TouchableOpacity
-                  key={q}
-                  style={styles.quickSearchButton}
-                  onPress={async () => {
-                    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
-                    await startQueryFlow(q);
-                    setTestInputVisible(false);
-                  }}
-                >
-                  <Text style={styles.quickSearchText}>{q}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
         </View>
       )}
     </View>
@@ -919,8 +851,27 @@ const MapView = ({
 };
 
 const styles = StyleSheet.create({
-  mapContainer: { flex: 1, width: '100%', position: 'relative' },
-  map: { flex: 1, width: '100%', position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+  root: { flex: 1, width: '100%', flexDirection: 'column' },
+
+  // 높이는 Animated flex로 제어
+  topMapArea: { width: '100%', overflow: 'hidden' },
+  bottomCameraArea: {
+    width: '100%',
+    backgroundColor: '#000',
+    overflow: 'hidden',
+  },
+
+  map: { flex: 1 },
+
+  // 일반 모드에서 지도 하단 45%만 터치 받는 투명 오버레이
+  bottomTouchOverlay: {
+    position: 'absolute',
+    left: 0, right: 0, bottom: 0,
+    height: '45%',
+    backgroundColor: 'transparent',
+    zIndex: 50,
+    elevation: 50,
+  },
 
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f5f5f5' },
   loadingOverlay: {
@@ -932,92 +883,41 @@ const styles = StyleSheet.create({
   errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20, backgroundColor: '#f8f8f8' },
   errorText: { fontSize: 16, fontWeight: 'bold', color: '#d32f2f', textAlign: 'center' },
 
-  modeIndicator: {
-    position: 'absolute', top: 20, alignSelf: 'center',
-    paddingVertical: 8, paddingHorizontal: 15, borderRadius: 20, zIndex: 10,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5,
-  },
-  modeText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
-
-  // 실시간 안내 정보 패널 스타일
+  // 지도 위 정보 패널
   navigationInfo: {
     position: 'absolute',
-    top: 70,
-    left: 20,
-    right: 20,
+    top: 12,
+    left: 12,
+    right: 12,
     backgroundColor: 'rgba(0, 176, 80, 0.95)',
     borderRadius: 10,
-    padding: 15,
+    padding: 12,
     zIndex: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
     shadowRadius: 3.84,
     elevation: 5,
-    maxHeight: 160, // 높이 제한으로 간소화
+    maxHeight: 150,
   },
-  navigationInfoOffRoute: {
-    backgroundColor: 'rgba(255, 87, 34, 0.95)',
-  },
-  navigationInfoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 5,
-  },
-  navigationInfoLabel: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  navigationInfoValue: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  nextInstructionContainer: {
-    marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.3)',
-  },
-  nextInstructionLabel: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  nextInstructionText: {
-    color: 'white',
-    fontSize: 12,
-    opacity: 0.9,
-    lineHeight: 16,
-  },
-  offRouteWarning: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.3)',
-    alignItems: 'center',
-  },
-  offRouteText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
+  navigationInfoOffRoute: { backgroundColor: 'rgba(255, 87, 34, 0.95)' },
+  navigationInfoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  navigationInfoLabel: { color: 'white', fontSize: 13, fontWeight: '500' },
+  navigationInfoValue: { color: 'white', fontSize: 15, fontWeight: 'bold' },
+  nextInstructionContainer: { marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.3)' },
+  nextInstructionLabel: { color: 'white', fontSize: 12, fontWeight: 'bold', marginBottom: 2 },
+  nextInstructionText: { color: 'white', fontSize: 12, opacity: 0.9, lineHeight: 16 },
+  offRouteWarning: { marginTop: 8, alignItems: 'center' },
+  offRouteText: { color: 'white', fontSize: 14, fontWeight: 'bold' },
 
-  gestureOverlay: { position: 'absolute', left: 0, right: 0, zIndex: 50, elevation: 50 },
-
-  confirmContainer: {
-    position: 'absolute', top: 80, left: 20, right: 20,
-    backgroundColor: 'rgba(66, 133, 244, 0.9)', padding: 15, borderRadius: 10, zIndex: 15,
-    alignItems: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5,
+  // 모드 표시
+  modeIndicator: {
+    position: 'absolute', top: 16, alignSelf: 'center',
+    paddingVertical: 6, paddingHorizontal: 12, borderRadius: 18, zIndex: 20,
   },
-  confirmText: { color: 'white', fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
-  confirmSubtext: { color: 'white', fontSize: 14, textAlign: 'center' },
+  modeText: { color: 'white', fontWeight: 'bold', fontSize: 13 },
 
-  // Test UI
+  // 테스트/확인 UI
   testToggleButton: {
     position: 'absolute', bottom: 100, right: 20,
     width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255, 0, 0, 0.8)',
@@ -1031,6 +931,16 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
   },
   testToggleText: { color: 'white', fontSize: 12, fontWeight: 'bold' },
+
+  confirmContainer: {
+    position: 'absolute', top: 80, left: 20, right: 20,
+    backgroundColor: 'rgba(66, 133, 244, 0.9)', padding: 15, borderRadius: 10, zIndex: 99,
+    alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, elevation: 5,
+  },
+  confirmText: { color: 'white', fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
+  confirmSubtext: { color: 'white', fontSize: 14, textAlign: 'center' },
+
   testInputContainer: {
     position: 'absolute', bottom: 160, left: 20, right: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.95)', padding: 15, borderRadius: 10,
@@ -1050,7 +960,6 @@ const styles = StyleSheet.create({
   testButtonSecondary: { backgroundColor: '#999' },
   testButtonText: { color: 'white', fontSize: 14, fontWeight: 'bold' },
   quickSearchContainer: { borderTopWidth: 1, borderTopColor: '#eee', paddingTop: 10 },
-  quickSearchLabel: { fontSize: 12, color: '#666', marginBottom: 5 },
   quickSearchButtons: { flexDirection: 'row', flexWrap: 'wrap' },
   quickSearchButton: {
     backgroundColor: '#f0f0f0', paddingHorizontal: 12, paddingVertical: 6,
