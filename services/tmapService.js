@@ -399,7 +399,7 @@ export const getCombinedDirections = async (start, goal) => {
     return transit;
   } catch (e) {
     const walk = await getPedestrianDirections(start, goal);
-    walk.fallbackReason = '대중교통 경로 실패로 도보 경로를 제공합니다.';
+    walk.fallbackReason = '도보로 이동하는 경로입니다.';
     return walk;
   }
 };
