@@ -53,7 +53,9 @@
     "react-native-webview": "13.12.5",
     "expo-sensors": "~14.0.2",
     "expo-file-system": "~18.0.12",
-    "react-native-view-shot": "~4.0.3"
+    "react-native-view-shot": "~4.0.3",
+    "expo-av": "~15.0.2",
+    "expo-image-manipulator": "~13.0.6"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

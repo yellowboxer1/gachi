@@ -9,17 +9,17 @@ import {
   View,
   Text,
   PanResponder,
-  Dimensions,
   ActivityIndicator,
   TextInput,
   TouchableOpacity,
   Pressable,
   Animated,
 } from 'react-native';
-import * as Speech from 'expo-speech';
 import ObstacleDetection from './ObstacleDetection';
 import { getPoiCoordinates } from '../../services/naverService';
 import { calculateDistance } from '../../utils/locationUtils';
+import tts from './ttsService';
+// import { dir4FromAngle } from '../dirUtils'; // (사용 안 하면 주석)
 
 const MapView = ({
   userLocation,
@@ -64,16 +64,17 @@ const MapView = ({
   const [unifiedTransitPath, setUnifiedTransitPath] = useState([]);
   const [showDetectDebug, setShowDetectDebug] = useState(false);
 
-
   // ====== Refs ======
   const mapRef = useRef(null);
-  const lastTapTimeRef = useRef(0);
-  const doubleTapTimeoutRef = useRef(null);
   const longPressTimeoutRef = useRef(null);
   const confirmTimeoutRef = useRef(null);
   const didFitOnceRef = useRef(false);
   const followCamTimer = useRef(null);
   const navInFlightRef = useRef(false);
+
+  // 🔑 음성인식 반복 방지
+  const lastQueryRef = useRef('');
+  const lastQueryAtRef = useRef(0);
 
   // ====== Layout animation (일반 ↔ 내비) ======
   const topFlex = useRef(new Animated.Value(isNavigationMode ? 0.5 : 1)).current;
@@ -92,12 +93,12 @@ const MapView = ({
     }).start();
   }, [isNavigationMode, topFlex, bottomFlex]);
 
-  // ====== Gesture (카메라/오버레이 공용) ======
+  // ====== Gesture ======
   const lastTapRef = useRef(0);
   const handleDoubleTapOrSingle = useCallback(() => {
     const now = Date.now();
     if (now - lastTapRef.current < 350) {
-      Speech.speak('경로 안내를 취소합니다.', { language: 'ko-KR' });
+      tts.speak('경로 안내를 취소합니다.', { priority: 10, type: 'map' });
       stopNavigation?.();
       setIsNavigationMode?.(false);
     }
@@ -105,14 +106,16 @@ const MapView = ({
   }, [setIsNavigationMode, stopNavigation]);
 
   const handleLongPress = useCallback(() => {
-    Speech.speak('음성 검색을 시작합니다. 목적지를 말해주세요.', { language: 'ko-KR' });
+    if (isNavigationMode) return; // 내비 중엔 검색 시작 금지
+    tts.speak('음성 검색을 시작합니다. 목적지를 말해주세요.', { priority: 10, type: 'ui' });
     startListening?.();
-  }, [startListening]);
+    setIsGestureMode(true);
+  }, [startListening, isNavigationMode]);
 
   // ====== Speech util ======
-  const speak = useCallback(async (text) => {
-    try { await Speech.stop(); } catch {}
-    Speech.speak(text, { language: 'ko-KR' });
+  const speak = useCallback((text, opts = {}) => {
+    if (!text) return;
+    tts.speak(text, { priority: 10, type: 'ui', ...opts });
   }, []);
 
   // ====== Coord Utils ======
@@ -155,6 +158,7 @@ const MapView = ({
     if (safeUserLocation) return true;
     const start = Date.now();
     while (!safeUserLocation && Date.now() - start < timeoutMs) {
+      // eslint-disable-next-line no-await-Loop
       await new Promise((r) => setTimeout(r, 100));
     }
     return !!safeUserLocation;
@@ -176,7 +180,7 @@ const MapView = ({
     didFitOnceRef.current = false;
     navInFlightRef.current = false;
 
-    if (typeof stopListening === 'function') stopListening();
+    stopListening?.();
     if (confirmTimeoutRef.current) {
       clearTimeout(confirmTimeoutRef.current);
       confirmTimeoutRef.current = null;
@@ -185,6 +189,10 @@ const MapView = ({
 
   // ====== POI 제시 ======
   const presentPoi = useCallback((list, index) => {
+    // 결과가 나왔으니 음성인식은 종료
+    stopListening?.();
+    setIsGestureMode(false);
+
     const poiList = list ?? recognizedPoiList;
     const i = typeof index === 'number' ? index : currentPoiIndex;
 
@@ -207,10 +215,12 @@ const MapView = ({
     const lockedName = poi.name;
     confirmTimeoutRef.current = setTimeout(() => {
       setIsConfirmMode(false);
+      setIsGestureMode(false);    // 🔸 검색 모드 배지 종료
+      stopListening?.();          // 🔸 음성 인식 종료
       speak('시간이 초과되어 자동으로 경로를 탐색합니다.');
       handleSearchDestination(lockedName, true);
     }, 10000);
-  }, [recognizedPoiList, currentPoiIndex, resetNavigation, speak]);
+  }, [recognizedPoiList, currentPoiIndex, resetNavigation, speak, stopListening]);
 
   // ====== 검색 플로우 ======
   const startQueryFlow = useCallback(async (query) => {
@@ -323,6 +333,7 @@ const MapView = ({
 
     if (tapCount === 1) {
       speak('경로를 탐색합니다.');
+      stopListening?.();          // 🔸 확정 시 음성 인식 OFF
       const selectedPoi = recognizedPoiList[currentPoiIndex];
       if (selectedPoi) {
         const coordinates = validateAndFormatCoordinate(selectedPoi);
@@ -367,11 +378,16 @@ const MapView = ({
         setSafeDestination(coordinates);
         didFitOnceRef.current = false;
 
+        // 🔑 탐색 시작 전에 음성 인식/검색모드 종료
+        stopListening?.();
+        setIsGestureMode(false);
+        setIsConfirmMode(false);
+
         navInFlightRef.current = true;
         setTimeout(() => {
           if (typeof startNavigation === 'function') {
             startNavigation({ latitude: coordinates.latitude, longitude: coordinates.longitude });
-            if (typeof setIsNavigationMode === 'function') setIsNavigationMode(true);
+            setIsNavigationMode?.(true);
           } else if (typeof searchDestination === 'function') {
             searchDestination(query, coordinates);
           }
@@ -415,7 +431,7 @@ const MapView = ({
           if (!isGestureMode && !isNavigationMode && !isConfirmMode) {
             setIsGestureMode(true);
             speak('목적지 검색 모드로 전환합니다.');
-            if (typeof startListening === 'function') startListening();
+            startListening?.();
           }
         }, 800);
       },
@@ -519,22 +535,36 @@ const MapView = ({
     setUnifiedTransitPath(uniquePath);
   }, [safeBusRoute, safeSubwayRoute]);
 
-  // ====== recognizedText → 공통 플로우 ======
+  // ====== recognizedText → 단발 처리 & 중복 방지 ======
   useEffect(() => {
-    if (recognizedText && recognizedText.trim()) {
-      if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
-      startQueryFlow(recognizedText.trim());
-    }
-  }, [recognizedText, startQueryFlow]);
+    const q = recognizedText?.trim();
+    if (!q) return;
+    console.log('Recognized Text:', q);
+
+    // 내비 중 또는 확인 모드에선 재진입 금지
+    if (isNavigationMode || isConfirmMode) return;
+
+    // 같은 쿼리를 5초 내 반복 방지
+    const now = Date.now();
+    if (now - lastQueryAtRef.current < 5000 && lastQueryRef.current === q) return;
+    lastQueryRef.current = q;
+    lastQueryAtRef.current = now;
+
+    // 결과가 왔으니 즉시 음성 인식 종료 + 검색 배지 OFF
+    stopListening?.();
+    setIsGestureMode(false);
+
+    if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+    startQueryFlow(q);
+  }, [recognizedText, isNavigationMode, isConfirmMode, stopListening, startQueryFlow]);
 
   // ====== Unmount cleanup ======
   useEffect(() => {
     return () => {
       if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
-      if (doubleTapTimeoutRef.current) clearTimeout(doubleTapTimeoutRef.current);
       if (confirmTimeoutRef.current) clearTimeout(confirmTimeoutRef.current);
       if (followCamTimer.current) clearTimeout(followCamTimer.current);
-      Speech.stop();
+      // tts.stop?.();  // 필요시 사용
     };
   }, []);
 
@@ -549,8 +579,8 @@ const MapView = ({
           {
             latitude: safeUserLocation.latitude,
             longitude: safeUserLocation.longitude,
-            zoom: 17,
-            tilt: 30,
+            zoom: 16.5,
+            tilt: 45,
             bearing: 0,
           },
           600
@@ -579,7 +609,7 @@ const MapView = ({
     };
 
     try {
-      mapRef.current.animateCamera?.({ ...center, zoom: 15, tilt: 0, bearing: 0 }, 600);
+      mapRef.current.animateCamera?.({ ...center, zoom: 15, tilt: 45, bearing: 0 }, 600);
     } catch {}
   }, [safeWalkRoute, safeSubwayRoute, safeBusRoute, unifiedTransitPath]);
 
@@ -621,11 +651,11 @@ const MapView = ({
             latitude: safeUserLocation.latitude,
             longitude: safeUserLocation.longitude,
             zoom: 16.5,
-            tilt: 0,
+            tilt: 45,
             bearing: 0,
           }}
           mapType="Basic"
-          useTextureView={true}        // ✅ 중요: 지도 Surface → TextureView
+          useTextureView={true}
           isShowLocationButton={true}
           isShowCompass={true}
           isShowScaleBar={false}
@@ -689,17 +719,15 @@ const MapView = ({
               <Text style={styles.navigationInfoLabel}>예상 시간:</Text>
               <Text style={styles.navigationInfoValue}>{formatTime(estimatedTime)}</Text>
             </View>
-            {currentDirection && (
+            {!!currentDirection && (
               <View style={styles.navigationInfoRow}>
                 <Text style={styles.navigationInfoLabel}>방향:</Text>
                 <Text style={styles.navigationInfoValue}>
-                  {currentDirection === '직진' ? '🔸 직진' : 
-                   currentDirection === '왼쪽' ? '⬅️ 왼쪽' :
-                   currentDirection === '오른쪽' ? '➡️ 오른쪽' :
-                   currentDirection === '약간 왼쪽' ? '↖️ 약간 왼쪽' :
-                   currentDirection === '약간 오른쪽' ? '↗️ 약간 오른쪽' :
-                   currentDirection === '뒤쪽' ? '🔄 뒤쪽' :
-                   currentDirection}
+                  {currentDirection === '앞' ? '⬆️ 앞'
+                    : currentDirection === '오른쪽' ? '➡️ 오른쪽'
+                    : currentDirection === '왼쪽' ? '⬅️ 왼쪽'
+                    : currentDirection === '뒤' ? '🔄 뒤'
+                    : currentDirection }
                 </Text>
               </View>
             )}
@@ -757,25 +785,25 @@ const MapView = ({
       </Animated.View>
 
       {/* 하단: 카메라/탐지 (내비 모드일 때만 표시) */}
-            <Animated.View style={[
-              styles.bottomCameraArea,
-              { flex: bottomFlex, height: isNavigationMode ? undefined : 0 }
-            ]}>
-              <ObstacleDetection
-                isNavigating={isNavigationMode}
-                userLocation={safeUserLocation}
-                minimal={!showDetectDebug}
-                autoStart
-              />
-              {isNavigationMode && (
-                <Pressable
-                  style={StyleSheet.absoluteFill}
-                  onPress={handleDoubleTapOrSingle}
-                  onLongPress={handleLongPress}
-                  delayLongPress={700}
-                />
-              )}
-            </Animated.View>
+      <Animated.View style={[
+        styles.bottomCameraArea,
+        { flex: bottomFlex, height: isNavigationMode ? undefined : 0 }
+      ]}>
+        <ObstacleDetection
+          isNavigating={isNavigationMode}
+          userLocation={safeUserLocation}
+          minimal={!showDetectDebug}
+          autoStart={false} // ✅ 내비 모드에만 동작하도록 고정
+        />
+        {isNavigationMode && (
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={handleDoubleTapOrSingle}
+            onLongPress={handleLongPress}
+            delayLongPress={700}
+          />
+        )}
+      </Animated.View>
 
       {/* ===== 아래는 테스트/확인/로딩 UI ===== */}
       <TouchableOpacity
@@ -786,12 +814,7 @@ const MapView = ({
       </TouchableOpacity>
       <TouchableOpacity
         style={styles.speechTestButton}
-        onPress={() => {
-          Speech.speak('음성 테스트입니다. 소리가 들리나요?', {
-            language: 'ko-KR',
-            rate: 0.9,
-          });
-        }}
+        onPress={() => tts.speak('음성 테스트입니다. 소리가 들리나요?', { priority: 5, type: 'ui' })}
       >
         <Text style={styles.testToggleText}>🔊</Text>
       </TouchableOpacity>
@@ -824,12 +847,14 @@ const MapView = ({
             <TouchableOpacity
               style={styles.testButton}
               onPress={async () => {
-                if (testDestination.trim()) {
-                  if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
-                  await startQueryFlow(testDestination.trim());
-                  setTestDestination('');
-                  setTestInputVisible(false);
-                }
+                const q = testDestination.trim();
+                if (!q) return;
+                if (confirmTimeoutRef.current) { clearTimeout(confirmTimeoutRef.current); confirmTimeoutRef.current = null; }
+                stopListening?.();
+                setIsGestureMode(false);
+                await startQueryFlow(q);
+                setTestDestination('');
+                setTestInputVisible(false);
               }}
             >
               <Text style={styles.testButtonText}>검색</Text>
@@ -928,7 +953,6 @@ const styles = StyleSheet.create({
     position: 'absolute', bottom: 100, right: 80,
     width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(0, 150, 255, 0.8)',
     justifyContent: 'center', alignItems: 'center', zIndex: 100, elevation: 100,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84,
   },
   testToggleText: { color: 'white', fontSize: 12, fontWeight: 'bold' },
 
