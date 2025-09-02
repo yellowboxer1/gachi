@@ -11,23 +11,37 @@ const useSpeechRecognition = ({ userLocation }) => {
     const [error, setError] = useState('');
     
     const isInitialized = useRef(false);
+    const listeningTimeoutRef = useRef(null);
 
     // 이벤트 핸들러들
     useSpeechRecognitionEvent('start', () => {
         console.log('onSpeechStart');
         setIsFinal(false);
         setError('');
+        setRecognizedText(''); // 이전 결과 초기화
+        setTranscript(''); // 이전 transcript 초기화
     });
     
     useSpeechRecognitionEvent('end', () => {
         console.log('onSpeechEnd');
         setIsListening(false);
+        
+        // 타임아웃 클리어
+        if (listeningTimeoutRef.current) {
+            clearTimeout(listeningTimeoutRef.current);
+            listeningTimeoutRef.current = null;
+        }
     });
     
     useSpeechRecognitionEvent('error', (e) => {
         console.log('onSpeechError:', e);
         setError(JSON.stringify(e?.error || 'Unknown error'));
         setIsListening(false);
+        
+        if (listeningTimeoutRef.current) {
+            clearTimeout(listeningTimeoutRef.current);
+            listeningTimeoutRef.current = null;
+        }
         
         if (e?.error === 'no-speech') {
             Speech.speak('음성이 감지되지 않았습니다. 다시 시도해주세요.', { language: 'ko-KR' });
@@ -38,25 +52,52 @@ const useSpeechRecognition = ({ userLocation }) => {
         console.log('onSpeechResults:', e);
         const resultsArray = (e?.results || []).map(result => result?.transcript || '');
         
-        if (e?.isFinal && resultsArray.length > 0) {
-            const filteredResults = resultsArray
-                .map(text => text
-                    .replace(/목적지를\s*말씀해\s*주세요/g, '')
-                    .replace(/시작하려면\s*화면을\s*눌러\s*주세요/g, '')
-                    .trim()
-                )
-                .filter(text => text.length > 0);
-                
-            const finalText = filteredResults[filteredResults.length - 1] || '';
+        if (resultsArray.length > 0) {
+            // 마지막 결과를 가져옴 (가장 최근/정확한 결과)
+            const latestResult = resultsArray[resultsArray.length - 1];
             
-            if (finalText) {
-                console.log('최종 음성 인식 결과:', finalText);
-                setRecognizedText(finalText);
-                setTranscript(finalText);
-                setIsFinal(true);
-            } else {
-                console.log('유효한 목적지가 없습니다.');
-                Speech.speak('목적지를 인식하지 못했습니다. 다시 말씀해주세요.', { language: 'ko-KR' });
+            // 임시 텍스트 업데이트
+            setTranscript(latestResult);
+            
+            if (e?.isFinal) {
+                // 최종 결과 처리
+                const finalText = latestResult.trim();
+                
+                // 시스템 메시지 필터링 (선택적)
+                const systemPhrases = [
+                    '목적지를 말씀해 주세요',
+                    '시작하려면 화면을 눌러 주세요',
+                    '목적지를 말해주세요',
+                    '음성 검색을 시작합니다'
+                ];
+                
+                let cleanedText = finalText;
+                for (const phrase of systemPhrases) {
+                    cleanedText = cleanedText.replace(new RegExp(phrase, 'gi'), '').trim();
+                }
+                
+                // 정제된 텍스트가 유효한 경우에만 설정
+                if (cleanedText && cleanedText.length > 0) {
+                    console.log('최종 음성 인식 결과:', cleanedText);
+                    setRecognizedText(cleanedText);
+                    setTranscript(cleanedText);
+                    setIsFinal(true);
+                    
+                    // 음성 인식 자동 종료
+                    stopListening();
+                } else if (finalText && finalText.length > 0) {
+                    // 필터링 후 텍스트가 없어진 경우 원본 사용
+                    console.log('원본 음성 인식 결과 사용:', finalText);
+                    setRecognizedText(finalText);
+                    setTranscript(finalText);
+                    setIsFinal(true);
+                    
+                    // 음성 인식 자동 종료
+                    stopListening();
+                } else {
+                    console.log('유효한 목적지가 없습니다.');
+                    Speech.speak('목적지를 인식하지 못했습니다. 다시 말씀해주세요.', { language: 'ko-KR' });
+                }
             }
         }
     });
@@ -64,7 +105,8 @@ const useSpeechRecognition = ({ userLocation }) => {
     useSpeechRecognitionEvent('partialResult', (e) => {
         const partialArray = (e?.results || []).map(result => result?.transcript || '');
         if (partialArray.length > 0) {
-            setTranscript(partialArray[0]);
+            const latestPartial = partialArray[partialArray.length - 1];
+            setTranscript(latestPartial);
         }
     });
 
@@ -90,6 +132,7 @@ const useSpeechRecognition = ({ userLocation }) => {
                 return;
             }
 
+            // 상태 초기화
             setIsListening(true);
             setRecognizedText('');
             setIsFinal(false);
@@ -107,10 +150,11 @@ const useSpeechRecognition = ({ userLocation }) => {
             Speech.speak('목적지를 말씀해주세요.', { language: 'ko-KR' });
             
             // 10초 후 자동 종료
-            setTimeout(async () => {
+            listeningTimeoutRef.current = setTimeout(async () => {
                 if (isListening) {
                     console.log('입력 시간 초과');
                     await stopListening();
+                    Speech.speak('시간이 초과되었습니다. 다시 시도해주세요.', { language: 'ko-KR' });
                 }
             }, 10000);
         } catch (error) {
@@ -128,6 +172,11 @@ const useSpeechRecognition = ({ userLocation }) => {
         }
 
         try {
+            if (listeningTimeoutRef.current) {
+                clearTimeout(listeningTimeoutRef.current);
+                listeningTimeoutRef.current = null;
+            }
+            
             await ExpoSpeechRecognitionModule.stop();
             console.log('Speech recognition stopped');
             setIsListening(false);
@@ -135,6 +184,14 @@ const useSpeechRecognition = ({ userLocation }) => {
             console.error('음성 인식 중지 에러:', error);
             setIsListening(false);
         }
+    }, []);
+
+    // 텍스트 재설정 (새로운 검색을 위해)
+    const resetRecognizedText = useCallback(() => {
+        setRecognizedText('');
+        setTranscript('');
+        setIsFinal(false);
+        setError('');
     }, []);
 
     // 컴포넌트 언마운트 시 정리
@@ -147,6 +204,9 @@ const useSpeechRecognition = ({ userLocation }) => {
             if (isListening) {
                 stopListening();
             }
+            if (listeningTimeoutRef.current) {
+                clearTimeout(listeningTimeoutRef.current);
+            }
         };
     }, []);
 
@@ -158,6 +218,7 @@ const useSpeechRecognition = ({ userLocation }) => {
         isListening,
         startListening,
         stopListening,
+        resetRecognizedText,
     };
 };
 

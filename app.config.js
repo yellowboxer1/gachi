@@ -101,6 +101,8 @@ export default ({ config }) => ({
   extra: {
     NAVER_MAP_CLIENT_ID: process.env.NAVER_MAP_CLIENT_ID,
     NAVER_MAP_CLIENT_SECRET: process.env.NAVER_MAP_CLIENT_SECRET,
+    NAVER_DEV_CLIENT_ID: process.env.NAVER_DEV_CLIENT_ID,        
+    NAVER_DEV_CLIENT_SECRET: process.env.NAVER_DEV_CLIENT_SECRET,    
     TMAP_APP_KEY: process.env.TMAP_APP_KEY,
     ODSAY_API_KEY: process.env.ODSAY_API_KEY,
   },
