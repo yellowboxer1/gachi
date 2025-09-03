@@ -3,7 +3,7 @@ dotenv.config();
 
 export default ({ config }) => ({
   ...config,
-  name: 'gachi',
+  name: '가치가개',
   slug: 'gachi',
   version: '1.0.0',
   orientation: 'portrait',

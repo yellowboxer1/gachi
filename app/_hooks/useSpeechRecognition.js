@@ -3,6 +3,23 @@ import { Alert } from 'react-native';
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 
+const PLACE_SUFFIXES = ['역','공원','해수욕장','해변','시장','백화점','병원','대학교','터미널','공항','시청','구청'];
+const CITY_HINTS = ['부산','서울','인천','대구','대전','광주','울산','제주','수원','성남','용인','고양','창원'];
+const BANWORDS = ['저녁','아침','점심','전역','재생','정지','취소']; // 목적지 아님
+
+function scoreTranscript(t, confidence = 0) {
+  const raw = (t || '').trim();
+  const norm = raw.replace(/\s+/g, '');
+  if (!norm) return -Infinity;
+  let s = (confidence || 0) * 100;
+  if (norm.length >= 3) s += 10;                      // 너무 짧은 단어 벌점 방지
+  if (PLACE_SUFFIXES.some(suf => norm.endsWith(suf))) s += 25;
+  if (CITY_HINTS.some(c => norm.includes(c))) s += 12;
+  if (BANWORDS.includes(norm)) s -= 40;               // “저녁/전역” 등은 큰 벌점
+  if (/^[가-힣]{1,2}$/.test(norm)) s -= 15;           // 1~2글자 짧은 단어는 감점
+  return s;
+}
+
 const useSpeechRecognition = ({ userLocation }) => {
     const [recognizedText, setRecognizedText] = useState('');
     const [transcript, setTranscript] = useState('');
@@ -49,58 +66,50 @@ const useSpeechRecognition = ({ userLocation }) => {
     });
     
     useSpeechRecognitionEvent('result', (e) => {
-        console.log('onSpeechResults:', e);
-        const resultsArray = (e?.results || []).map(result => result?.transcript || '');
+          console.log('onSpeechResults:', e);
+          // 1) 후보 목록 [{transcript, confidence}]
+          const alts =
+            (e?.results || [])
+              .map(r => ({
+                transcript: (r?.transcript || '').trim(),
+                confidence: Number.isFinite(r?.confidence) ? r.confidence : 0.5,
+              }))
+              .filter(a => !!a.transcript);
         
-        if (resultsArray.length > 0) {
-            // 마지막 결과를 가져옴 (가장 최근/정확한 결과)
-            const latestResult = resultsArray[resultsArray.length - 1];
-            
-            // 임시 텍스트 업데이트
-            setTranscript(latestResult);
-            
-            if (e?.isFinal) {
-                // 최종 결과 처리
-                const finalText = latestResult.trim();
-                
-                // 시스템 메시지 필터링 (선택적)
-                const systemPhrases = [
-                    '목적지를 말씀해 주세요',
-                    '시작하려면 화면을 눌러 주세요',
-                    '목적지를 말해주세요',
-                    '음성 검색을 시작합니다'
-                ];
-                
-                let cleanedText = finalText;
-                for (const phrase of systemPhrases) {
-                    cleanedText = cleanedText.replace(new RegExp(phrase, 'gi'), '').trim();
-                }
-                
-                // 정제된 텍스트가 유효한 경우에만 설정
-                if (cleanedText && cleanedText.length > 0) {
-                    console.log('최종 음성 인식 결과:', cleanedText);
-                    setRecognizedText(cleanedText);
-                    setTranscript(cleanedText);
-                    setIsFinal(true);
-                    
-                    // 음성 인식 자동 종료
-                    stopListening();
-                } else if (finalText && finalText.length > 0) {
-                    // 필터링 후 텍스트가 없어진 경우 원본 사용
-                    console.log('원본 음성 인식 결과 사용:', finalText);
-                    setRecognizedText(finalText);
-                    setTranscript(finalText);
-                    setIsFinal(true);
-                    
-                    // 음성 인식 자동 종료
-                    stopListening();
-                } else {
-                    console.log('유효한 목적지가 없습니다.');
-                    Speech.speak('목적지를 인식하지 못했습니다. 다시 말씀해주세요.', { language: 'ko-KR' });
-                }
+           if (alts.length === 0) return;
+        
+          // 2) 시스템 프롬프트 문구 제거(있다면)
+          const systemPhrases = [
+            '목적지를 말씀해 주세요','시작하려면 화면을 눌러 주세요','목적지를 말해주세요','음성 검색을 시작합니다'
+          ];
+          for (const a of alts) {
+            for (const phrase of systemPhrases) {
+              a.transcript = a.transcript.replace(new RegExp(phrase, 'gi'), '').trim();
             }
-        }
-    });
+          }
+        
+          // 3) 점수화하여 최적 후보 선택
+          const scored = alts
+            .map(a => ({ ...a, score: scoreTranscript(a.transcript, a.confidence) }))
+            .sort((x, y) => (y.score - x.score) || ((y.transcript?.length||0) - (x.transcript?.length||0)));
+          const best = scored[0];
+          console.log('🎤 pickBestTranscript =>', best?.transcript, 'score=', best?.score, scored);
+        
+          // 4) 진행 중에는 화면에 최신(최고 점수) 후보만 임시 반영
+          setTranscript(best?.transcript || '');
+          // 5) 최종 전환 시에만 확정
+          if (e?.isFinal) {
+            const finalPick = (best?.transcript || '').trim();
+            if (finalPick) {
+              setRecognizedText(finalPick);
+              setTranscript(finalPick);
+              setIsFinal(true);
+              stopListening();
+            } else {
+              Speech.speak('목적지를 인식하지 못했습니다. 다시 말씀해주세요.', { language: 'ko-KR' });
+            }
+          }
+        });
     
     useSpeechRecognitionEvent('partialResult', (e) => {
         const partialArray = (e?.results || []).map(result => result?.transcript || '');
