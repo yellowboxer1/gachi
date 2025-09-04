@@ -1,3 +1,4 @@
+// ObstacleDetection.js
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Vibration, AppState } from 'react-native';
 import { Camera, useCameraDevices, useCameraPermission } from 'react-native-vision-camera';
@@ -21,27 +22,21 @@ function resolveWsUrl(propUrl) {
       withReplace(viaBase(globalThis.__OD_BASE__)),
       withReplace(extra.DET_WS),
       withReplace(viaBase(extra.DET_BASE)),
-      withReplace('wss://0eb471ad9f5d.ngrok-free.app/ws')
+      withReplace('wss://266514037759.ngrok-free.app/ws')
   );
 }
 
 // ======================== Config ========================
-const FRAME_INTERVAL = 1200;           // ~1.25fps
-const PING_INTERVAL_MS = 80000;       // 80s
-const PONG_TIMEOUT_MS = 16000;        // 16s
+const FRAME_INTERVAL = 1200;           // 프레임 전송 간격
+const PING_INTERVAL_MS = 80000;        // ping 주기
+const PONG_TIMEOUT_MS = 16000;         // pong 타임아웃(누적은 아래 MAX로 판단)
 const MAX_MISSED_PONGS = 3;
-
-const STALE_RESULT_MS = 4000;         // 4s 지나면 드롭
-
-// 🔻 하단 ROI 무시(선택). 교차로 감지를 위해 0 권장. 필요 시 0.2~0.35 조정
-const IGNORE_BOTTOM_RATIO = 0;        // 0 = 크롭 비활성화
+const STALE_RESULT_MS = 4000;          // 최근 수신 이후 이 시간 넘으면 보간/멘트 중지
+const IGNORE_BOTTOM_RATIO = 0;         // 필요시 하단 ROI 무시 비율
+const MIN_GREEN_SECONDS = 7;           // <7초면 진입 금지
 
 // ======================== Traffic Light ========================
 const TL = { DETECTING_1:-2, DETECTING_2:-1, NONE:0, GREEN_INIT:1, RED:2, GREEN_GO:3, YELLOW:4, GREEN_BLINK:5 };
-const TL_LABEL = {
-  [-2]:'신호등 검출 진행 중', [-1]:'신호등 검출 진행 중', [0]:'신호등 없음', [1]:'초록불 감지(대기)',
-  [2]:'빨간불(대기)', [3]:'초록불(건너도 됨)', [4]:'노란불(무시)', [5]:'초록불 점멸(대기)',
-};
 const TL_COOLDOWN_MS = 2500;
 
 // ===== 안정화(오탐 억제) =====
@@ -51,14 +46,52 @@ const MIN_CONSISTENT_CROSSWALK = 3;
 
 // ====== TTS 우선순위 규칙 ======
 const TTS_PRI = {
-  obstacleHigh: 96,   // 서버 priority_warning
-  obstacle: 95,       // 일반 장애물/경고
-  bf: 93,             // BF 경고/주의
-  stairs: 92,         // 계단
-  warn: 90,           // 기타 경고
-  nav: 60,            // 경로 안내(낮게 유지)
-  ui: 40,             // UI
+  obstacleHigh: 96,
+  obstacle: 95,
+  bf: 93,
+  stairs: 92,
+  warn: 90,
+  nav: 60,
+  ui: 40,
 };
+
+// ======================== BF (Barrier-Free) 메시지 맵 ========================
+const BF_MESSAGES = {
+  stair_normal: "계단이 있습니다. 발을 조심하세요.",
+  stair_broken: "파손된 계단이 있습니다. 매우 주의하세요.",
+  steepramp: "급경사로가 있습니다. 난간을 잡고 이동하세요.",
+  flatness_A: "바닥이 매우 평탄합니다.",
+  flatness_B: "바닥이 비교적 평탄합니다.",
+  flatness_C: "바닥이 고르지 않습니다. 주의하세요.",
+  flatness_D: "바닥이 많이 고르지 않습니다. 천천히 이동하세요.",
+  flatness_E: "바닥이 매우 고르지 않습니다. 매우 주의하세요.",
+  brailleblock_dot: "점자 블록(점형)이 감지되었습니다. 점자 블록을 따라 이동하세요.",
+  brailleblock_line: "점자 블록(선형)이 감지되었습니다. 점자 블록을 따라 이동하세요.",
+  brailleblock_dot_broken: "점자 블록(점형)이 파손되어 있습니다. 주의하세요.",
+  brailleblock_line_broken: "점자 블록(선형)이 파손되어 있습니다. 주의하세요.",
+  outcurb_rectangle: "연석이 있습니다. 단차에 유의하세요.",
+  outcurb_slide: "경사 연석이 있습니다. 미끄럼과 단차에 주의하세요.",
+  outcurb_rectangle_broken: "연석이 파손되어 있습니다. 매우 주의하세요.",
+  sidegap_in: "실내 문턱이 있습니다. 걸림에 주의하세요.",
+  sidegap_out: "실외 문턱이 있습니다. 걸림에 주의하세요.",
+  sewer_cross: "배수구(격자)가 있습니다. 발 빠짐에 주의하세요.",
+  sewer_line: "배수구(선형)가 있습니다. 발 빠짐에 주의하세요.",
+  continuity_manhole: "맨홀이 있습니다. 발 빠짐에 주의하세요.",
+  planecrosswalk_normal: "횡단보도가 있습니다.",
+  planecrosswalk_broken: "파손된 횡단보도가 있습니다. 주의해서 건너세요.",
+  ramp_yes: "경사로가 있습니다.",
+  ramp_no: "경사로가 없습니다. 단차 가능성에 주의하세요.",
+  pillar: "기둥이 전방에 있습니다. 충돌에 주의하세요.",
+  wall: "벽이 전방에 있습니다. 충돌에 주의하세요.",
+  stone: "돌이 전방에 있습니다. 걸림에 주의하세요.",
+  bump_slow: "과속방지턱이 있습니다. 발을 조심하세요.",
+  tierbump: "단차 방지턱이 있습니다. 걸림에 주의하세요.",
+};
+
+function bfMessageFor(key) {
+  const k = String(key || '').replace(/^bf::/, '');
+  return BF_MESSAGES[k] || null;
+}
 
 // '주의!' 프리픽스 보장
 function ensureCautionPrefix(msg = '') {
@@ -69,45 +102,54 @@ function ensureCautionPrefix(msg = '') {
 }
 
 // ======================== Helpers ========================
+// 서버 상태(가능: 숫자코드/문자/객체) → 정규화된 신호등 기본상태
 function normalizeTrafficLightState(data){
-  const state = (typeof data?.traffic_light_state === 'number') ? data.traffic_light_state
-    : (() => {
-        const f = Array.isArray(data?.special_features) ? data.special_features.find(x=>x?.type==='traffic_light') : null;
-        if (!f) return null;
-        if (typeof f.state === 'number') return f.state;
-        const s = String(f.state ?? '').toLowerCase();
-        if (s === 'red') return TL.RED;
-        if (s.includes('blink') || s.includes('flash')) return TL.GREEN_BLINK;
-        if (s === 'green_go' || s === 'green' || s === 'go') return TL.GREEN_GO;
-        if (s === 'green_init' || s === 'init_green' || s === 'pending') return TL.GREEN_INIT;
-        if (s === 'none') return TL.NONE;
-        if (s === 'detecting' || s === '') return TL.DETECTING_1;
-        return null;
-      })();
-  return state;
+  const tlObj = data?.traffic_light;
+  if (tlObj && (tlObj.m1_color === 'red' || tlObj.m1_color === 'green' || tlObj.m1_color == null)) {
+    if (tlObj.m1_color === 'red') return TL.RED;
+    if (tlObj.m1_color === 'green') return TL.GREEN_GO; // 기본 green(세부 분류는 파생 단계에서)
+    return TL.DETECTING_1; // m1이 아직 없으면 검출중 취급
+  }
+  const sNum = (typeof data?.traffic_light_state === 'number') ? data.traffic_light_state : null;
+  if (sNum != null) return sNum;
+
+  const f = Array.isArray(data?.special_features) ? data.special_features.find(x=>x?.type==='traffic_light') : null;
+  if (f) {
+    const st = (typeof f.state === 'number') ? f.state : String(f.state ?? '').toLowerCase();
+    if (st === 'red' || st === TL.RED) return TL.RED;
+    if (st === 'green' || st === 'go' || st === TL.GREEN_GO) return TL.GREEN_GO;
+    if (st === 'none' || st === TL.NONE) return TL.NONE;
+    return TL.DETECTING_1;
+  }
+  return null;
+}
+
+function normSec(v){
+  if (typeof v === 'string'){
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return null;
+    return v.toLowerCase().includes('ms') ? Math.round(n/1000) : Math.round(n);
+  }
+  if (typeof v === 'number' && Number.isFinite(v)) return v > 120 ? Math.round(v/1000) : Math.round(v);
+  return null;
 }
 
 function extractRemainingSeconds(data){
+  if (data?.traffic_light && Number.isFinite(data.traffic_light.m2_seconds)) return Math.round(data.traffic_light.m2_seconds);
   if (Number.isFinite(data?.m2_seconds)) return Math.round(data.m2_seconds);
+
   const item = Array.isArray(data?.special_features)
     ? data.special_features.find(x => x?.type === 'traffic_light_seconds')
     : null;
   if (item && Number.isFinite(item.seconds)) return Math.round(item.seconds);
+
   const keys = ['traffic_light_remaining','remaining_time','remain_time','remaining','time_remaining','time_left','sec_left'];
   for (const k of keys){
     const v = data?.[k]; const n = normSec(v); if (n!=null) return n;
   }
   return null;
 }
-function normSec(v){
-  if (typeof v === 'string'){
-    const n = parseFloat(v);
-    if (Number.isFinite(n)) return v.toLowerCase().includes('ms') ? Math.round(n/1000) : Math.round(n);
-    return null;
-  }
-  if (typeof v === 'number' && Number.isFinite(v)) return v > 120 ? Math.round(v/1000) : Math.round(v);
-  return null;
-}
+
 function colorByLevel(level){
   switch(level){
     case 'critical': return '#FF0000';
@@ -117,6 +159,7 @@ function colorByLevel(level){
     default: return '#00FF00';
   }
 }
+
 const pushHist = (arr, v, max) => { arr.push(v); if (arr.length > max) arr.shift(); };
 const majority = (arr) => {
   const m = new Map();
@@ -127,30 +170,57 @@ const majority = (arr) => {
 };
 const stableBool = (arr, need) => (arr.filter(Boolean).length >= need);
 
+// 서버 원시 state + 초 → UI용 상태로 정규화(<7초면 진입 금지로 GREEN_BLINK)
+function deriveTlUiState(rawState, remainSec) {
+  if (rawState == null) return null;
+  if (rawState === TL.RED) return TL.RED;
+  if (rawState === TL.NONE) return TL.NONE;
+  if (rawState === TL.GREEN_GO || rawState === TL.GREEN_INIT || rawState === TL.GREEN_BLINK) {
+    if (typeof remainSec === 'number') {
+      return (remainSec < MIN_GREEN_SECONDS) ? TL.GREEN_BLINK : TL.GREEN_GO;
+    }
+    return TL.GREEN_INIT;
+  }
+  return rawState;
+}
+
 // ======================== Component ========================
-// ⚠️ autoStart는 무시하고, isNavigating이 true일 때만 동작
-const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoStart = false, wsUrl: propWsUrl }) => {
+const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoStart = false, wsUrl: propWsUrl, onHeadingChange }) => {
   // 단일 인스턴스 가드
   const [isPrimary, setIsPrimary] = useState(false);
   useEffect(() => {
-    if (!globalThis.__OD_PRIMARY__) { globalThis.__OD_PRIMARY__ = true; setIsPrimary(true); }
-    return () => { if (isPrimary) delete globalThis.__OD_PRIMARY__; };
+    if (!globalThis.__OD_PRIMARY__) { 
+      globalThis.__OD_PRIMARY__ = true; 
+      setIsPrimary(true); 
+    }
+    return () => { 
+      if (isPrimary) delete globalThis.__OD_PRIMARY__; 
+    };
   }, [isPrimary]);
 
-  // Camera
+  // Camera - Hook 규칙 준수
   const devices = useCameraDevices();
   const device = useMemo(() => (devices?.back) ? devices.back :
     (Array.isArray(devices) ? devices.find(d=>d?.position==='back') : null), [devices]);
+  
   const { hasPermission, requestPermission } = useCameraPermission();
   const [cameraReady, setCameraReady] = useState(false);
   const cameraRef = useRef(null);
-  useEffect(()=>{ if (hasPermission === false) requestPermission().catch(()=>{}); }, [hasPermission, requestPermission]);
+
+  const handlePermissionRequest = useCallback(async () => {
+    if (hasPermission === false) {
+      try { await requestPermission(); } catch (error) { console.warn('Permission request failed:', error); }
+    }
+  }, [hasPermission, requestPermission]);
+
+  useEffect(() => { handlePermissionRequest(); }, [handlePermissionRequest]);
 
   // AppState
   const appStateRef = useRef(AppState.currentState);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
-      const prev = appStateRef.current; appStateRef.current = s;
+      const prev = appStateRef.current; 
+      appStateRef.current = s;
       if (s === 'active' && /inactive|background/.test(prev)) {
         try { wsRef.current?.close(); } catch {}
       } else if (/inactive|background/.test(s)) {
@@ -164,10 +234,12 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
   // Active guard
   const instanceId = useRef(Math.random().toString(36).slice(2));
   const isActive = useCallback(() => globalThis.__OD_ACTIVE__?.id === instanceId.current, []);
+  
   useEffect(() => {
     if (!isPrimary) return;
     const prev = globalThis.__OD_ACTIVE__;
     if (prev?.cleanup) { try { prev.cleanup(); } catch {} }
+    
     const cleanup = () => {
       try { frameIntervalRef.current && clearInterval(frameIntervalRef.current); } catch {}
       frameIntervalRef.current = null;
@@ -175,16 +247,25 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
       keepAliveTimerRef.current = null;
       try { healthTimerRef.current && clearInterval(healthTimerRef.current); } catch {}
       healthTimerRef.current = null;
+      try { localTickTimerRef.current && clearInterval(localTickTimerRef.current); } catch {}
+      localTickTimerRef.current = null;
       try { wsRef.current?.close(); } catch {}
       wsRef.current = null;
-      tts.stop?.(); Vibration.cancel();
+      try { tts.stop?.(); } catch {}
+      Vibration.cancel();
     };
+    
     globalThis.__OD_ACTIVE__ = { id: instanceId.current, cleanup };
-    return () => { if (globalThis.__OD_ACTIVE__?.id === instanceId.current) delete globalThis.__OD_ACTIVE__; cleanup(); };
+    return () => { 
+      if (globalThis.__OD_ACTIVE__?.id === instanceId.current) {
+        delete globalThis.__OD_ACTIVE__; 
+      }
+      cleanup(); 
+    };
   }, [isPrimary]);
 
   // State
-  const [isDetecting, setIsDetecting] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(Boolean(autoStart));
   const [dangerLevel, setDangerLevel] = useState('safe');
   const [lastWarning, setLastWarning] = useState('');
   const [isConnected, setIsConnected] = useState(false);
@@ -195,13 +276,12 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
   const [recvCount, setRecvCount] = useState(0);
   const [lastFrameAt, setLastFrameAt] = useState(null);
   const [lastB64, setLastB64] = useState(0);
-
   const [obstacles, setObstacles] = useState([]);
   const [specials, setSpecials] = useState({ crosswalk:false, stairsUp:false, stairsDown:false });
 
   // Refs
   const connectingRef = useRef(false);
-  const wsRef = useRef(null);     
+  const wsRef = useRef(null);
   const wsUrlRef = useRef(resolveWsUrl(propWsUrl));
   const frameIntervalRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
@@ -224,10 +304,18 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
   // 소켓 토큰(레이스 컷)
   const socketIdRef = useRef(0);
 
-  // 🔑 프레임 식별/최신성
+  // 프레임 식별/최신성
   const frameSeqRef = useRef(0);
   const lastAcceptedSeqRef = useRef(-1);
   const [lastAcceptedSeq, setLastAcceptedSeq] = useState(-1);
+
+  // keep-alive
+  const keepAliveTimerRef = useRef(null);
+  const healthTimerRef = useRef(null);
+
+  // 로컬 카운트다운
+  const localRemainRef = useRef(null);
+  const localTickTimerRef = useRef(null);
 
   // 안전 전송
   const wsSendSafe = useCallback((ws, obj) => {
@@ -248,11 +336,12 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
     }
   }, []);
 
-  // ===== TL 안내 (그대로 유지) =====
+  // TL 안내 (TTS/햅틱)
   const announceTrafficLight = useCallback((state, remainSec) => {
     const now = Date.now();
     if (lastTLStateRef.current === state && (now - lastTLAtRef.current) < TL_COOLDOWN_MS) return;
-    lastTLStateRef.current = state; lastTLAtRef.current = now;
+    lastTLStateRef.current = state; 
+    lastTLAtRef.current = now;
     if (!isNavigating) return;
 
     if (state === TL.NONE){
@@ -266,13 +355,14 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
       return;
     }
     if (state === TL.GREEN_BLINK){
-      tts.flushSpeak('주의! 신호가 곧 바뀝니다. 진입하지 말고 다음 신호를 기다리세요.', { priority: TTS_PRI.obstacle, type: 'obstacle' });
+      tts.flushSpeak('주의! 신호가 곧 바뀝니다. 진입하지 말고 다음 신호를 기다리세요.', { priority: TTS_PRI.obstacleHigh, type: 'obstacle' });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       Vibration.vibrate([0,300,120,300]);
       return;
     }
     if (state === TL.GREEN_GO){
-      tts.flushSpeak('초록불입니다. 지금 건널 수 있습니다.', { priority: TTS_PRI.obstacle, type: 'obstacle' });
+      const msg = (typeof remainSec === 'number') ? `초록불입니다. 지금 건널 수 있습니다. 남은 시간 약 ${remainSec}초.` : '초록불입니다. 지금 건널 수 있습니다.';
+      tts.flushSpeak(msg, { priority: TTS_PRI.obstacle, type: 'obstacle' });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       return;
     }
@@ -282,21 +372,27 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         return;
       }
-      tts.flushSpeak('주의! 신호가 곧 바뀝니다. 진입하지 말고 다음 신호를 기다리세요.', { priority: TTS_PRI.obstacle, type: 'obstacle' });
+      tts.flushSpeak('주의! 신호가 곧 바뀝니다. 진입하지 말고 다음 신호를 기다리세요.', { priority: TTS_PRI.obstacleHigh, type: 'obstacle' });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       Vibration.vibrate([0,300,120,300]);
       return;
     }
   }, [isNavigating]);
 
-  // ===== Detection result =====
+  // Detection result 처리
   const handleDetectionResult = useCallback((data) => {
-    if (data?.error){ setConnectionError(data.error); return; }
+    if (data?.error){ 
+      setConnectionError(data.error); 
+      return; 
+    }
+    const now = Date.now();
+    lastRxAtRef.current = now;
+
     setDangerLevel(data?.danger_level || 'safe');
 
     const feats = Array.isArray(data?.special_features) ? data.special_features : [];
     const flags = {
-      crosswalk: !!feats.find(f => f?.type === 'crosswalk'),
+      crosswalk: !!feats.find(f => f?.type === 'crosswalk') || !!data?.crosswalk,
       stairsUp:  !!feats.find(f => f?.type === 'stairs_up'),
       stairsDown:!!feats.find(f => f?.type === 'stairs_down'),
     };
@@ -307,24 +403,30 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
 
     pushHist(histRef.current.crosswalk, flags.crosswalk, STABILITY_WINDOW);
 
-    const s = normalizeTrafficLightState(data);
-    const r = extractRemainingSeconds(data);
-    if (s !== null && s !== undefined) pushHist(histRef.current.tl, s, STABILITY_WINDOW);
+    // 신호등 상태 + 잔여초
+    const rawState = normalizeTrafficLightState(data);
+    const remainSec = extractRemainingSeconds(data);
+    if (rawState !== null && rawState !== undefined) pushHist(histRef.current.tl, rawState, STABILITY_WINDOW);
 
     const crosswalkStable = stableBool(histRef.current.crosswalk, MIN_CONSISTENT_CROSSWALK);
     const tlMaj = majority(histRef.current.tl);
-    const tlStable = tlMaj.count >= MIN_CONSISTENT_TL ? tlMaj.value : null;
+    const rawStable = tlMaj.count >= MIN_CONSISTENT_TL ? tlMaj.value : null;
+    const derived = deriveTlUiState(rawStable, remainSec);
 
-    if (tlStable !== null) {
-      setTlState(tlStable);
-      setTlRemain(typeof r === 'number' ? r : null);
+    if (derived !== null) {
+      setTlState(derived);
+      const sec = (typeof remainSec === 'number') ? remainSec : null;
+      setTlRemain(sec);
+      // 로컬 카운트다운 초기화
+      localRemainRef.current = sec;
     }
-    // 교차로가 안정적으로 감지될 때만 신호 발표
-    if (tlStable !== null && crosswalkStable) {
-      const shouldAnnounce = (lastStableTLRef.current !== tlStable) || (lastStableCrosswalkRef.current !== crosswalkStable);
+
+    // 교차로 안정화된 경우에만 안내
+    if (derived !== null && crosswalkStable) {
+      const shouldAnnounce = (lastStableTLRef.current !== derived) || (lastStableCrosswalkRef.current !== crosswalkStable);
       if (shouldAnnounce) {
-        announceTrafficLight(tlStable, (typeof r === 'number' ? r : null));
-        lastStableTLRef.current = tlStable;
+        announceTrafficLight(derived, (typeof remainSec === 'number' ? remainSec : null));
+        lastStableTLRef.current = derived;
         lastStableCrosswalkRef.current = crosswalkStable;
       }
     }
@@ -341,9 +443,9 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
       Vibration.vibrate([0,150,100,150]);
     }
 
-    // ✅ 내비 중일 때만 음성 안내
+    // 내비 중일 때만 추가 안내
     if (isNavigating) {
-      if (flags.stairsUp)   {
+      if (flags.stairsUp) {
         try { tts.flushSpeak(ensureCautionPrefix('오르막 계단이 있습니다.'), { priority: TTS_PRI.stairs, type: 'obstacle' }); } catch {}
         Vibration.vibrate([0,200,100,200]);
       }
@@ -351,24 +453,41 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
         try { tts.flushSpeak(ensureCautionPrefix('내리막 계단이 있습니다. 주의하세요.'), { priority: TTS_PRI.stairs, type: 'obstacle' }); } catch {}
         Vibration.vibrate([0,300,100,300]);
       }
-      if (flags.crosswalk)  { try { tts.speak('횡단보도입니다.', { priority: 80, type: 'obstacle', dedupeMs: 2500 }); } catch {} }
+      if (flags.crosswalk) { 
+        try { tts.speak('횡단보도입니다.', { priority: 80, type: 'obstacle', dedupeMs: 2500 }); } catch {} 
+      }
     }
 
-    // ▶︎ Barrier-Free 특성 안내
+    // Barrier-Free 특성 안내 (서버는 메시지 없이 type/severity만 보내는 걸 권장)
     for (const f of feats) {
       if (typeof f?.type === 'string' && f.type.startsWith('bf::')) {
-        const msg = f?.message;
+        const msg = bfMessageFor(f.type);
         const sev = f?.severity || 'info';
-        if (msg && (sev === 'danger' || sev === 'warn') && isNavigating) {
-          const speakMsg = ensureCautionPrefix(msg);
-          try { tts.flushSpeak(speakMsg, { priority: TTS_PRI.bf, type: 'obstacle', dedupeMs: 3000 }); } catch {}
-          if (sev === 'danger') { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); Vibration.vibrate([0,320,120,320]); }
-          else if (sev === 'warn') { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning); Vibration.vibrate([0,220,120,220]); }
+
+        if (msg && isNavigating) {
+          const speakMsg = (sev === 'danger' || sev === 'warn')
+            ? ensureCautionPrefix(msg)
+            : msg;
+
+          try {
+            const pri = (sev === 'danger') ? TTS_PRI.obstacleHigh
+                      : (sev === 'warn')   ? TTS_PRI.bf
+                      : TTS_PRI.ui;
+            tts.flushSpeak(speakMsg, { priority: pri, type: 'obstacle', dedupeMs: 3000 });
+          } catch {}
+
+          if (sev === 'danger') { 
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); 
+            Vibration.vibrate([0,320,120,320]); 
+          } else if (sev === 'warn') { 
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning); 
+            Vibration.vibrate([0,220,120,220]); 
+          }
         }
       }
     }
 
-    // ▶︎ 서버 warnings[]
+    // 서버 warnings[] (문자 멘트가 여전히 온다면 안전하게 처리)
     if (isNavigating && Array.isArray(data?.warnings)) {
       for (const w of data.warnings) {
         if (w && typeof w === 'string') {
@@ -377,37 +496,60 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
       }
     }
 
-    const now = Date.now();
     if (isNavigating && data?.priority_warning && now - lastWarningTimeRef.current > 2000){
       tts.flushSpeak(ensureCautionPrefix(data.priority_warning), { priority: TTS_PRI.obstacleHigh, type: 'obstacle' });
       setLastWarning(data.priority_warning);
       lastWarningTimeRef.current = now;
     }
-  }, [announceTrafficLight, isNavigating]);
 
-  // ===== WebSocket =====
-  const scheduleReconnect = useCallback(() => {
-    if (!isDetecting) return;
-    const attempt = Math.min(reconnectAttemptRef.current + 1, 6);
-    reconnectAttemptRef.current = attempt;
-    const delay = Math.min(30000, 1000 * Math.pow(2, attempt));
-    if (!reconnectTimeoutRef.current){
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectTimeoutRef.current = null;
-        connectWebSocket();
-      }, delay);
-      console.log(`[ws] 재연결 예약 (${attempt}) ${Math.round(delay/1000)}s 후`);
+    // 🔧 onHeadingChange 콜백 호출 (기기 방향 정보가 있다면)
+    if (typeof onHeadingChange === 'function' && data?.device_heading) {
+      try { onHeadingChange(data.device_heading); } catch (error) { console.warn('onHeadingChange error:', error); }
     }
-  }, [isDetecting]);
+  }, [announceTrafficLight, isNavigating, onHeadingChange]);
 
-  const clearReconnectTimer = useCallback(() => {
-    if (reconnectTimeoutRef.current){ clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
-  }, []);
+  // 로컬 카운트다운: 서버 응답 사이에 안전 보간
+  useEffect(() => {
+    if (localTickTimerRef.current) {
+      clearInterval(localTickTimerRef.current);
+      localTickTimerRef.current = null;
+    }
+    localTickTimerRef.current = setInterval(() => {
+      const now = Date.now();
+      const isFresh = (now - lastRxAtRef.current) <= STALE_RESULT_MS;
+      if (!isFresh) return;
 
-  // keep-alive
-  const keepAliveTimerRef = useRef(null);
-  const healthTimerRef = useRef(null);
+      // 교차로 안정화 전이면 멘트/보간 금지
+      const crosswalkStable = stableBool(histRef.current.crosswalk, MIN_CONSISTENT_CROSSWALK);
+      if (!crosswalkStable) return;
 
+      if (typeof localRemainRef.current === 'number' && localRemainRef.current > 0) {
+        localRemainRef.current = Math.max(0, localRemainRef.current - 1);
+        setTlRemain(localRemainRef.current);
+
+        // 로컬 잔여초 기반 파생 상태 재계산
+        const tlMaj = majority(histRef.current.tl);
+        const rawStable = tlMaj.count >= MIN_CONSISTENT_TL ? tlMaj.value : null;
+        const derived = deriveTlUiState(rawStable, localRemainRef.current);
+        if (derived != null) {
+          const shouldAnnounce = (lastStableTLRef.current !== derived);
+          setTlState(derived);
+          if (shouldAnnounce) {
+            announceTrafficLight(derived, localRemainRef.current);
+            lastStableTLRef.current = derived;
+          }
+        }
+      }
+    }, 1000);
+    return () => {
+      if (localTickTimerRef.current) {
+        clearInterval(localTickTimerRef.current);
+        localTickTimerRef.current = null;
+      }
+    };
+  }, [announceTrafficLight]);
+
+  // ===== WebSocket 연결/유지 =====
   const startKeepAlive = useCallback(() => {
     stopKeepAlive();
     keepAliveTimerRef.current = setInterval(() => {
@@ -432,303 +574,170 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
     if (healthTimerRef.current){ clearInterval(healthTimerRef.current); healthTimerRef.current = null; }
   }, []);
 
-  const connectWebSocket = useCallback(() => {
-    if (!isNavigating) return;
-    if (!isActive() || !isPrimary) { console.log('[ws] skip: not active/primary', { active: isActive(), isPrimary }); return; }
-    if (connectingRef.current) return;
-    connectingRef.current = true;
-    
-    try{
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        connectingRef.current = false;
-        return;
+  const scheduleReconnect = useCallback(() => {
+    if (!isDetecting) return;
+    const attempt = Math.min(reconnectAttemptRef.current + 1, 6);
+    reconnectAttemptRef.current = attempt;
+    const delay = Math.min(30000, 1000 * Math.pow(2, attempt));
+    if (!reconnectTimeoutRef.current){
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        connectWebSocket();
+      }, delay);
+      console.log(`[ws] 재연결 예약 (${attempt}) ${Math.round(delay/1000)}s 후`);
+    }
+  }, [isDetecting]);
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimeoutRef.current){ clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
+  }, []);
+
+  // ===== 프레임 캡처 & 전송 =====
+  const captureAndSendFrame = useCallback(async () => {
+    if (!isDetecting) return;
+    if (!cameraReady || !cameraRef.current) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (busyRef.current) return;
+
+    busyRef.current = true;
+    try {
+      // 사진 캡처 (속도 우선)
+      const photo = await cameraRef.current.takePhoto({
+        qualityPrioritization: 'speed',
+        skipMetadata: true,
+      });
+
+      // 파일 → base64
+      const b64 = await FileSystem.readAsStringAsync(photo.path, { encoding: FileSystem.EncodingType.Base64 });
+      setLastB64(b64.length);
+
+      // (선택) 리사이즈/압축 예시
+      // const manip = await ImageManipulator.manipulateAsync(photo.path, [{ resize: { width: 640 } }], { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG });
+      // const b64 = await FileSystem.readAsStringAsync(manip.uri, { encoding: FileSystem.EncodingType.Base64 });
+
+      const seq = ++frameSeqRef.current;
+      const payload = {
+        type: 'frame',
+        seq,
+        ts: Date.now(),
+        image_b64: b64,
+        meta: {
+          ignore_bottom_ratio: IGNORE_BOTTOM_RATIO,
+          nav: Boolean(isNavigating),
+        }
+      };
+      const ok = wsSendSafe(wsRef.current, payload);
+      if (ok) {
+        setSentCount((c)=>c+1);
+        setLastFrameAt(Date.now());
+        setLastAcceptedSeq(seq);
+        lastAcceptedSeqRef.current = seq;
       }
-      if (wsRef.current) { try { wsRef.current.close(); } catch {} wsRef.current = null; }
+    } catch (e) {
+      console.warn('capture/send error:', e?.message || e);
+    } finally {
+      busyRef.current = false;
+    }
+  }, [cameraReady, isDetecting, isNavigating, wsSendSafe]);
 
-      const url = wsUrlRef.current = resolveWsUrl(propWsUrl);
-      console.log('🔌 WebSocket 연결 시도:', url);
+  // ===== 소켓 연결 함수 =====
+  const connectWebSocket = useCallback(() => {
+    if (!isPrimary) return;
+    if (connectingRef.current) return;
+    const url = wsUrlRef.current;
+    if (!url) {
+      setConnectionError('WS URL 미지정');
+      return;
+    }
+    connectingRef.current = true;
+    clearReconnectTimer();
 
+    try {
+      const id = ++socketIdRef.current;
       const ws = new WebSocket(url);
       wsRef.current = ws;
-      const myId = ++socketIdRef.current;
 
       ws.onopen = () => {
-        if (ws !== wsRef.current || myId !== socketIdRef.current) return;
-        console.log('🟢 WebSocket 연결 성공');
+        if (id !== socketIdRef.current) { try { ws.close(); } catch {} return; }
+        connectingRef.current = false;
         setIsConnected(true);
         setConnectionError(null);
-        reconnectAttemptRef.current = 0;
         missedPongsRef.current = 0;
-        lastRxAtRef.current = Date.now();
         lastPongAtRef.current = Date.now();
-        clearReconnectTimer();
         startKeepAlive();
 
-        // 🔁 서버 버퍼/큐 초기화 요청
-        wsSendSafe(wsRef.current, { type:'reset', t:'reset', reason:'new-connection' });
+        // 전송 루프 시작
+        if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = setInterval(() => {
+          captureAndSendFrame();
+        }, FRAME_INTERVAL);
 
-        setTimeout(() => { try { captureAndSendFrame(); } catch(_){} }, 150);
-        if (!minimal){
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          tts.speak('장애물 감지 서버 연결됨', { priority: TTS_PRI.ui, type: 'ui' });
-        }
-        connectingRef.current = false;
+        console.log('[ws] open', url);
       };
 
-      ws.onmessage = (event) => {
-        if (ws !== wsRef.current || myId !== socketIdRef.current) return;
-        lastRxAtRef.current = Date.now();
-        try{
-          const data = JSON.parse(event.data);
-          const typ = data?.type || data?.t;
-          if (typ === 'pong') {
+      ws.onmessage = (ev) => {
+        if (id !== socketIdRef.current) return;
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg?.t === 'pong' || msg?.type === 'pong') {
             lastPongAtRef.current = Date.now();
             missedPongsRef.current = 0;
             return;
           }
-          // 🔒 최신성/순서 가드
-          const seq = Number.isFinite(data?.frameSeq) ? Number(data.frameSeq) : null;
-          if (seq !== null && seq < lastAcceptedSeqRef.current) {
-            console.log('⏩ drop old frame result:', seq, '<', lastAcceptedSeqRef.current);
-            return;
-          }
-          const clientTs = Number(data?.clientTs || 0);
-          if (clientTs && Date.now() - clientTs > STALE_RESULT_MS) {
-            console.log('⏩ drop stale result (>4s old)');
-            return;
-          }
-
-          setRecvCount(c=>c+1);
-          if (seq !== null) { lastAcceptedSeqRef.current = seq; setLastAcceptedSeq(seq); }
-          handleDetectionResult(data);
-        }catch(e){
-          const s = String(event.data || '');
-          if (/pong/i.test(s)) {
-            lastPongAtRef.current = Date.now();
-            missedPongsRef.current = 0;
-            return;
-          }
-          console.warn('📨 메시지 파싱 실패:', e);
+          // 일반 detection 응답
+          setRecvCount((c)=>c+1);
+          handleDetectionResult(msg);
+        } catch (e) {
+          // 서버가 텍스트 아닌 바이너리/비JSON 보내는 경우 무시
         }
       };
 
       ws.onerror = (e) => {
-        if (ws !== wsRef.current || myId !== socketIdRef.current) return;
-        const msg = e?.message || String(e);
-        connectingRef.current = false;
-        if (/client is null/i.test(msg)) {
-          console.log('[ws] benign error (client is null) — ignore');
-        } else {
-          console.error('🔴 WebSocket 오류:', msg);
-          setConnectionError(`연결 오류: ${msg}`);
-        }
+        if (id !== socketIdRef.current) return;
+        console.log('[ws] error:', e?.message || e);
+        setConnectionError(String(e?.message || 'WS error'));
       };
 
-      ws.onclose = (ev) => {
-        if (ws !== wsRef.current || myId !== socketIdRef.current) return;
-        console.log('⚪ WebSocket 종료', ev?.code, ev?.reason);
+      ws.onclose = () => {
+        if (id !== socketIdRef.current) return;
+        console.log('[ws] close');
         setIsConnected(false);
-        stopKeepAlive();
         connectingRef.current = false;
-        if (ev?.code === 4001) { return; }
+        stopKeepAlive();
+        try { frameIntervalRef.current && clearInterval(frameIntervalRef.current); } catch {}
+        frameIntervalRef.current = null;
         scheduleReconnect();
       };
-    }catch(e){
-      console.error('🔴 WebSocket 생성 오류:', e);
-      setConnectionError(`연결 생성 실패: ${e.message}`);
+    } catch (e) {
       connectingRef.current = false;
+      setConnectionError(String(e?.message || e));
       scheduleReconnect();
     }
-  }, [isActive, isPrimary, isNavigating, handleDetectionResult, minimal, propWsUrl, scheduleReconnect, clearReconnectTimer, startKeepAlive, stopKeepAlive]);
+  }, [isPrimary, clearReconnectTimer, startKeepAlive, stopKeepAlive, scheduleReconnect, captureAndSendFrame, handleDetectionResult]);
 
-  const disconnectWebSocket = useCallback(()=>{
-    try{ wsRef.current?.close(); }catch{}
-    wsRef.current = null;
-    clearReconnectTimer();
-    stopKeepAlive();
-    setIsConnected(false);
-  }, [clearReconnectTimer, stopKeepAlive]);
+  const disconnectWebSocket = useCallback(() => {
+    try { wsRef.current?.close(); } catch {}
+  }, []);
 
-  // ===== Frame capture via takePhoto =====
-  const captureAndSendFrame = useCallback(async ()=>{
-    try{
-      if (!isDetecting) return;
-      if (!cameraReady) { console.warn('[OD] skip: camera not ready'); return; }
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) { console.warn('[OD] skip: ws not open'); return; }
-      if (!isNavigating) return;
-      if (!isActive() || !isPrimary) return;
-      if (busyRef.current) return;
+  // 탐지 on/off 제어 (autoStart 고려)
+  useEffect(() => {
+    setIsDetecting(Boolean(autoStart) || Boolean(isNavigating));
+  }, [autoStart, isNavigating]);
 
-      busyRef.current = true;
-
-      // 1) takePhoto 가드
-      if (!cameraRef.current || typeof cameraRef.current.takePhoto !== 'function') {
-        console.error('[OD] takePhoto is not available (vision-camera not linked?)');
-        throw new Error('takePhoto_unavailable');
-      }
-      
-      let photo;
-      try {
-        photo = await cameraRef.current.takePhoto({
-          qualityPrioritization: 'speed',
-          flash: 'off',
-          enableShutterSound: false,
-          skipMetadata: true,
-        });
-      } catch (e) {
-        console.error('[OD] takePhoto failed:', e);
-        throw new Error('takePhoto_failed');
-      }
-
-      const uri = photo?.path?.startsWith('file://') ? photo.path : (photo?.path ? `file://${photo.path}` : null);
-      if (!uri) {
-        console.error('[OD] invalid photo/path:', photo);
-        throw new Error('photo_path_invalid');
-      }
-
-      // ROI 크롭 (선택)
-      const srcW = photo?.width || 1080;
-      const srcH = photo?.height || 1920;
-      const cropH = Math.max(1, Math.round(srcH * (1 - IGNORE_BOTTOM_RATIO)));
-
-      let transforms = [];
-      if (IGNORE_BOTTOM_RATIO > 0) {
-        transforms.push({ crop: { originX: 0, originY: 0, width: srcW, height: cropH } });
-      }
-      transforms.push({ resize: { width: 640 } });
-
-      let manip;
-      try {
-        manip = await ImageManipulator.manipulateAsync(
-          uri,
-          transforms,
-          { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG, base64: true }
-        );
-      } catch (e) {
-        console.error('[OD] manipulateAsync failed:', e);
-        throw new Error('manipulate_failed');
-      }
-
-      const base64 = manip?.base64;
-      if (!base64) {
-        console.error('[OD] no base64 produced from manipulator');
-        throw new Error('no_base64');
-      }
-
-      setLastB64(base64?.length || 0);
-      if (__DEV__) console.log('b64 size:', (base64.length/1024).toFixed(0), 'KB');
-
-      const payload = {
-        type:'frame', t:'frame',
-        image: base64,
-        timestamp: Date.now(),
-        location: userLocation,
-        enable_special: true,
-        frameSeq: ++frameSeqRef.current,
-        clientTs: Date.now(),
-        noStore: true,
-        roi: { scheme: (IGNORE_BOTTOM_RATIO>0?'ignore-bottom':'full'), ignoreBottomRatio: IGNORE_BOTTOM_RATIO },
-      };
-      let ok = wsSendSafe(wsRef.current, payload);
-      if (!ok) { setTimeout(() => wsSendSafe(wsRef.current, payload), 120); }
-      setSentCount(c=>c+1);
-      setLastFrameAt(Date.now());
-
-      FileSystem.deleteAsync(uri, { idempotent:true }).catch(()=>{});
-    }catch(e){
-      console.error('📸 프레임 캡처/전송 오류 (stage-tag above 참조):', e?.message || e);
-      if (String(e?.message).includes('takePhoto_unavailable') || String(e?.message).includes('call to function')) {
-        console.warn('[OD] disabling detection: takePhoto unavailable');
-        setIsDetecting(false);
-      }
-    }finally{
-      busyRef.current = false;
-    }
-  }, [isActive, cameraReady, userLocation, isPrimary, isDetecting, isNavigating, wsSendSafe]);
-
-  // ===== Start/Stop =====
-  const startDetection = useCallback(()=>{
-    if (!isActive() || !isPrimary) return;
-    if (hasPermission !== true) return;
-    if (!isNavigating) return;
-
-    setIsDetecting(true);
-    connectWebSocket();
-
-    if (!minimal){
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      tts.speak('장애물 감지를 시작합니다.', { priority: TTS_PRI.ui, type: 'ui' });
-    }
-  }, [isActive, isPrimary, hasPermission, connectWebSocket, minimal, isNavigating]);
-
-  const stopDetection = useCallback(()=>{
-    setIsDetecting(false);
-    if (frameIntervalRef.current){ clearInterval(frameIntervalRef.current); frameIntervalRef.current = null; }
-    disconnectWebSocket();
-
-    setDangerLevel('safe'); setLastWarning('');
-    setTlState(null); setTlRemain(null);
-    setSentCount(0); setRecvCount(0); setLastFrameAt(null); setLastB64(0);
-    setObstacles([]); setSpecials({ crosswalk:false, stairsUp:false, stairsDown:false });
-    setLastAcceptedSeq(-1); lastAcceptedSeqRef.current = -1; frameSeqRef.current = 0;
-
-    if (!minimal){
-      tts.speak('장애물 감지를 중지합니다.', { priority: TTS_PRI.ui, type: 'ui' });
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    }
-  }, [disconnectWebSocket, minimal]);
-
-  // ===== Auto control: isNavigating에만 연동 =====
-  useEffect(()=>{
+  useEffect(() => {
     if (!isPrimary) return;
-    if (hasPermission == null) return;
-    if (hasPermission === true && isNavigating && !isDetecting) {
-      startDetection();
-    } else if ((!isNavigating) && isDetecting) {
-      stopDetection();
-    }
-  }, [isNavigating, hasPermission, device, cameraReady, isDetecting, startDetection, stopDetection, isPrimary]);
-
-  // ws 열렸고 내비 중인데 감지가 꺼져있으면 ON
-  useEffect(() => {
-    if (isPrimary && isConnected && isNavigating && !isDetecting) setIsDetecting(true);
-  }, [isPrimary, isConnected, isNavigating, isDetecting]);
-
-  // isDetecting false 시 프레임 루프 정리
-  useEffect(() => {
-    if (!isDetecting && frameIntervalRef.current) {
-      clearInterval(frameIntervalRef.current);
+    if (isDetecting) {
+      connectWebSocket();
+    } else {
+      disconnectWebSocket();
+      stopKeepAlive();
+      try { frameIntervalRef.current && clearInterval(frameIntervalRef.current); } catch {}
       frameIntervalRef.current = null;
     }
-  }, [isDetecting]);
+    return () => {};
+  }, [isPrimary, isDetecting, connectWebSocket, disconnectWebSocket, stopKeepAlive]);
 
-  // 연결/카메라 준비 후 프레임 루프 시작
-  useEffect(() => {
-    if (isPrimary && isDetecting && isConnected && cameraReady && !frameIntervalRef.current) {
-      frameIntervalRef.current = setInterval(captureAndSendFrame, FRAME_INTERVAL);
-    }
-  }, [isPrimary, isDetecting, isConnected, cameraReady, captureAndSendFrame]);
-
-  // 5초마다 연결 점검(내비 중일 때만)
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (!isPrimary || !isDetecting || !isNavigating) return;
-      const ws = wsRef.current;
-      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        console.log('[ws] periodic checker -> reopen');
-        connectWebSocket();
-      }
-    }, 5000);
-    return () => clearInterval(id);
-  }, [isPrimary, isDetecting, isNavigating, connectWebSocket]);
-
-  // Cleanup
-  useEffect(()=>()=>{ 
-    if (frameIntervalRef.current){ clearInterval(frameIntervalRef.current); frameIntervalRef.current=null; }
-    disconnectWebSocket(); tts.stop?.(); Vibration.cancel();
-  }, [disconnectWebSocket]);
-
-  // ===== UI =====
+  // UI 렌더링 (HUD 없이 카메라만)
   if (!isPrimary) return null;
 
   if (hasPermission !== true){
@@ -736,13 +745,14 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
       <View style={styles.fill}>
         <View style={styles.center}>
           <Text style={styles.errorText}>카메라 권한이 필요합니다.</Text>
-          <TouchableOpacity onPress={requestPermission} style={styles.permBtn}>
+          <TouchableOpacity onPress={handlePermissionRequest} style={styles.permBtn}>
             <Text style={{ color:'#fff', fontWeight:'bold' }}>권한 허용하기</Text>
           </TouchableOpacity>
         </View>
       </View>
     );
   }
+
   if (!device){
     return (
       <View style={styles.fill}>
@@ -770,135 +780,21 @@ const ObstacleDetection = ({ isNavigating, userLocation, minimal = true, autoSta
             console.error('[OD] VisionCamera is mounted, but takePhoto is not a function (wrong build?)');
           }
           setCameraReady(true);
-         }}
+        }}
         onError={(e)=>console.warn('📷 VisionCamera error:', e)}
       />
-
-      {!minimal && (
-        <View style={[styles.panel, { borderColor: colorByLevel(dangerLevel) }]}>
-          <View style={styles.panelHeader}>
-            <Text style={styles.panelTitle}>장애물 감지 {isDetecting ? '작동 중' : '대기'}</Text>
-            {isConnected && <View style={styles.connectedDot} />}
-          </View>
-
-          {connectionError && (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>⚠️ {connectionError}</Text>
-              <Text style={styles.errorHint}>
-                서버 실행: uvicorn server:app --host 0.0.0.0 --port 8000{'\n'}
-                ngrok 실행: ngrok http --region=ap 8000
-              </Text>
-            </View>
-          )}
-
-          <Text style={styles.subtle}>WS: {wsUrlRef.current?.replace(/^wss?:\/\//,'')}</Text>
-          <Text style={styles.subtle}>sent: {sentCount}  recv: {recvCount}  b64: {lastB64}</Text>
-          {lastFrameAt && <Text style={styles.subtle}>last frame: {new Date(lastFrameAt).toLocaleTimeString()}</Text>}
-          <Text style={styles.subtle}>lastSeq: {lastAcceptedSeq}</Text>
-
-          <View style={[styles.dangerBox, { backgroundColor: colorByLevel(dangerLevel)+'30' }]}>
-            <Text style={[styles.dangerText, { color: colorByLevel(dangerLevel) }]}>
-              위험도: {dangerLevel === 'critical' ? '긴급' : dangerLevel === 'high' ? '높음' : dangerLevel === 'medium' ? '중간' : dangerLevel === 'low' ? '낮음' : '안전'}
-            </Text>
-            {tlState !== null && (
-              <>
-                <Text style={styles.trafficText}>신호등 상태: {TL_LABEL[tlState] ?? tlState}</Text>
-                {typeof tlRemain === 'number' && <Text style={styles.trafficText}>남은 시간: {tlRemain}초</Text>}
-              </>
-            )}
-            {lastWarning ? <Text style={styles.lastText}>마지막 안내: {lastWarning}</Text> : null}
-          </View>
-
-          {Array.isArray(obstacles) && obstacles.length > 0 && (
-            <View style={{ marginTop: 8 }}>
-              <Text style={{ color:'#fff', fontWeight:'bold', marginBottom:4 }}>감지된 장애물: {obstacles.length}개</Text>
-              {obstacles.slice(0,3).map((o, i) => {
-                const name = o?.korean_name ?? o?.name ?? '장애물';
-                const pos  = typeof o?.position === 'string' ? o.position : (o?.position?.label ?? '');
-                const dist = (typeof o?.distance === 'number') ? `${Math.round(o.distance)}m` : '';
-                return (
-                  <Text key={i} style={{ color:'#DDD', fontSize:11 }}>
-                    • {pos ? `${pos}: ` : ''}{name}{dist ? ` (${dist})` : ''}
-                  </Text>
-                );
-              })}
-            </View>
-          )}
-
-          <TouchableOpacity
-            style={[styles.btn, { backgroundColor: isDetecting ? '#FF4444' : '#44BB44' }]}
-            onPress={isDetecting ? stopDetection : startDetection}
-          >
-            <Text style={styles.btnText}>{isDetecting ? '감지 중지' : '감지 시작'}</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* minimal=true 여도 항상 보이는 미니 HUD */}
-      <View style={styles.tinyHud}>
-        <Text style={styles.tinyHudText}>
-          {isConnected ? '✅' : '❌'} s:{sentCount} r:{recvCount}
-          {cameraReady ? ' cam✔' : ' cam…'}
-          ws:{wsRef.current?.readyState ?? -1}
-        </Text>
-        <Text style={styles.tinyHudText}>lastSeq:{lastAcceptedSeq}</Text>
-        <View style={{ flexDirection:'row', marginTop:4, alignItems:'center' }}>
-          <Text style={styles.badge}>장애물 {Math.min(obstacles?.length || 0, 99)}</Text>
-          {specials.crosswalk && <Text style={styles.badge}>🚸</Text>}
-          {specials.stairsUp && <Text style={styles.badge}>⬆️ 계단</Text>}
-          {specials.stairsDown && <Text style={styles.badge}>⬇️ 계단</Text>}
-        </View>
-        {connectionError && (
-          <Text style={[styles.tinyHudText, { color:'#FF6666', fontSize:9, marginTop:2 }]}>
-            {connectionError}
-          </Text>
-        )}
-      </View>
+      {/* HUD/패널 비노출: TTS/햅틱만 동작 */}
     </View>
   );
 };
 
-// ======================== Styles ========================
+// 스타일 정의
 const styles = StyleSheet.create({
   fill: { flex:1, backgroundColor:'#000' },
   center: { flex:1, justifyContent:'center', alignItems:'center' },
-
-  panel: {
-    position:'absolute', top:10, left:10, right:10,
-    backgroundColor:'rgba(0,0,0,0.6)', borderRadius:10, borderWidth:2, padding:10,
-  },
-  panelHeader: { flexDirection:'row', alignItems:'center', marginBottom:6 },
-  panelTitle: { color:'#fff', fontSize:15, fontWeight:'bold', flex:1 },
-  connectedDot: { width:10, height:10, borderRadius:5, backgroundColor:'#00FF00' },
-
-  subtle: { color:'#9cf', fontSize:11, marginBottom:2 },
-
-  dangerBox: { borderRadius:6, padding:8, marginTop:6, alignItems:'flex-start' },
-  dangerText: { fontSize:13, fontWeight:'bold' },
-  trafficText: { color:'#fff', marginTop:3, fontSize:12 },
-  lastText: { color:'#eee', marginTop:2, fontSize:11 },
-
-  btn: { borderRadius:18, paddingVertical:8, alignItems:'center', marginTop:8 },
-  btnText: { color:'#fff', fontSize:13, fontWeight:'bold' },
-
   errorText: { color:'#FF6666', fontSize:13, marginVertical:4 },
-  errorBox: { backgroundColor:'rgba(255,100,100,0.2)', padding:8, borderRadius:4, marginVertical:4 },
-  errorHint: { color:'#FFB366', fontSize:10, marginTop:4, fontFamily: 'monospace' },
-  
   permBtn: { marginTop:10, padding:10, backgroundColor:'#007AFF', borderRadius:8 },
   mono: { color:'#fff', marginTop:8, textAlign:'center' },
-
-  tinyHud: {
-    position:'absolute', left:12, bottom:95,
-    paddingHorizontal:8, paddingVertical:4, borderRadius:10,
-    backgroundColor:'rgba(0,0,0,0.6)',
-    maxWidth: 220,
-  },
-  tinyHudText: { color:'#9cf', fontSize:10 },
-  badge: {
-    color:'#fff', fontSize:10, paddingHorizontal:6, paddingVertical:2,
-    marginRight:4, borderRadius:8, backgroundColor:'rgba(255,255,255,0.1)',
-  }
 });
 
 export default ObstacleDetection;

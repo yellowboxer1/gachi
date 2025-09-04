@@ -1,7 +1,4 @@
 <resources>
-  <string name="app_name">gachi</string>
+  <string name="app_name">가치가개</string>
   <string name="expo_system_ui_user_interface_style" translatable="false">automatic</string>
-  <string name="expo_splash_screen_resize_mode" translatable="false">contain</string>
-  <string name="naver_map_sdk_ncp_key_id">slfyv0yqzk</string>
-  <string name="expo_splash_screen_status_bar_translucent" translatable="false">false</string>
 </resources>
